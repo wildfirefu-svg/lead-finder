@@ -2,6 +2,7 @@
 .venv/
 .codegraph/
 .superpowers/
+.worktrees/
 __pycache__/
 *.pyc
 *.log
