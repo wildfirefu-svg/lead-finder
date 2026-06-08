@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .evidence import evidence_json, score_reason_text
+
 YARN_TERMS = [
     "fiberglass yarn",
     "glass fiber yarn",
@@ -204,6 +206,19 @@ def score_lead(lead: dict) -> dict:
     country = str(lead.get("country_region", "") or "").lower()
     mismatch_hits = _hits(text, COUNTRY_MISMATCH_TERMS.get(country, [])) if source_type == "website" else []
 
+    additions: list[dict] = []
+    penalties: list[dict] = []
+
+    def add(points: int, reason: str, terms: list[str]) -> int:
+        if points and terms:
+            additions.append({"points": points, "reason": reason, "terms": list(dict.fromkeys(terms))[:8]})
+        return points
+
+    def subtract(points: int, reason: str, terms: list[str]) -> int:
+        if points and terms:
+            penalties.append({"points": -points, "reason": reason, "terms": list(dict.fromkeys(terms))[:8]})
+        return points
+
     product_fit = "Both"
     if yarn_hits and not fabric_hits:
         product_fit = "Fiberglass Yarn"
@@ -211,41 +226,40 @@ def score_lead(lead: dict) -> dict:
         product_fit = "Fiberglass Fabric"
 
     score = 0
-    score += min(len(general_hits), 5) * 8
-    score += min(len(yarn_hits), 5) * 12
-    score += min(len(fabric_hits), 5) * 12
+    score += add(min(len(general_hits), 5) * 8, "general fiberglass terms", general_hits)
+    score += add(min(len(yarn_hits), 5) * 12, "yarn terms", yarn_hits)
+    score += add(min(len(fabric_hits), 5) * 12, "fabric terms", fabric_hits)
     if lead.get("email"):
-        score += 14
+        score += add(14, "email present", [str(lead.get("email"))])
     if lead.get("website"):
-        score += 8
+        score += add(8, "company website", [str(lead.get("website"))])
     if lead.get("company_name"):
-        score += 6
+        score += add(6, "company name", [str(lead.get("company_name"))])
     if source_type == "bill of lading":
-        score += 18
+        score += add(18, "bill of lading buyer evidence", ["bill of lading"])
     if source_type == "saas contact":
-        score += 10
-    score += min(len(buyer_hits), 4) * 7
-    score += min(len(downstream_hits), 3) * 10
-    score += min(len(company_evidence_hits), 3) * 4
-    score -= min(len(negative_hits), 3) * 15
+        score += add(10, "SaaS contact source", [str(lead.get("source_name", "SaaS Contact") or "SaaS Contact")])
+    score += add(min(len(buyer_hits), 4) * 7, "buyer terms", buyer_hits)
+    score += add(min(len(downstream_hits), 3) * 10, "downstream application", downstream_hits)
+    score += add(min(len(company_evidence_hits), 3) * 4, "company page evidence", company_evidence_hits)
+    score -= subtract(min(len(negative_hits), 3) * 15, "negative terms", negative_hits)
     if is_directory_source:
-        score -= 35
+        score -= subtract(35, "directory or marketplace source", [source_location])
     if mismatch_hits:
-        score -= 45
+        score -= subtract(45, "target-country mismatch", mismatch_hits)
     score = max(0, min(100, score))
 
     matched = yarn_hits + fabric_hits + general_hits + buyer_hits + downstream_hits + company_evidence_hits
-    if matched:
-        fit_reason = "Matched keywords: " + ", ".join(dict.fromkeys(matched[:8]))
-    else:
-        fit_reason = "No fiberglass keywords found yet; review manually."
-    if is_directory_source:
-        fit_reason = f"{fit_reason} Penalized: directory or marketplace source."
-    if mismatch_hits:
-        fit_reason = f"{fit_reason} Penalized: target-country mismatch."
+    evidence = {
+        "additions": additions,
+        "penalties": penalties,
+        "matched_terms": list(dict.fromkeys(matched))[:12],
+    }
+    fit_reason = score_reason_text(evidence)
 
     return {
         "match_score": score,
         "product_fit": product_fit,
         "fit_reason": fit_reason,
+        "score_evidence": evidence_json(evidence),
     }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import tempfile
 import unittest
 import urllib.error
@@ -197,6 +198,23 @@ class LeadFinderTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(scored["match_score"], 50)
+
+    def test_scoring_returns_structured_evidence(self) -> None:
+        scored = score_lead(
+            {
+                "source_type": "Website",
+                "country_region": "USA",
+                "company_name": "Example Pultrusion",
+                "website": "https://buyer.example",
+                "raw_text": "Pultrusion manufacturer using fiberglass roving. Contact us.",
+            }
+        )
+
+        evidence = json.loads(scored["score_evidence"])
+        self.assertTrue(any(item["reason"] == "yarn terms" for item in evidence["additions"]))
+        self.assertTrue(any(item["reason"] == "company website" for item in evidence["additions"]))
+        self.assertEqual(evidence["penalties"], [])
+        self.assertIn("+", scored["fit_reason"])
 
     def test_scoring_penalizes_social_and_pdf_noise(self) -> None:
         scored = score_lead(
