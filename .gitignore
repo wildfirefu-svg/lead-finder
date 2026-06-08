@@ -1,0 +1,11 @@
+.env
+.venv/
+.codegraph/
+.superpowers/
+__pycache__/
+*.pyc
+*.log
+data/
+data/*.sqlite
+data/*.sqlite-*
+exports/
