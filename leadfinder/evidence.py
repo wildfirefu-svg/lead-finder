@@ -95,7 +95,4 @@ def _format_item(item: dict, *, positive: bool) -> str:
     reason = str(item.get("reason", "") or "").strip()
     terms = [str(term) for term in item.get("terms", []) if str(term).strip()]
     suffix = f": {', '.join(terms[:5])}" if terms else ""
-    text = f"{prefix} {reason}{suffix}".strip()
-    if not positive:
-        text = f"{text} Penalized."
-    return text
+    return f"{prefix} {reason}{suffix}".strip()

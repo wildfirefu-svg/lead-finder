@@ -33,9 +33,14 @@ class EvidenceTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("+25 downstream application: pultrusion", text)
-        self.assertIn("+15 target market evidence: Canada", text)
-        self.assertIn("-30 supplier language: exporter", text)
+        self.assertEqual(
+            text.split("; "),
+            [
+                "+25 downstream application: pultrusion",
+                "+15 target market evidence: Canada",
+                "-30 supplier language: exporter",
+            ],
+        )
 
     def test_lead_classification_label_maps_existing_categories(self) -> None:
         self.assertEqual(lead_classification_label("downstream_customer"), "buyer")

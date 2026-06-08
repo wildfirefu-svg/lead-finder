@@ -173,7 +173,10 @@ class LeadFinderTests(unittest.TestCase):
         )
 
         self.assertLess(scored["match_score"], 50)
-        self.assertIn("Penalized", scored["fit_reason"])
+        evidence = json.loads(scored["score_evidence"])
+        self.assertTrue(
+            any(item["reason"] == "directory or marketplace source" for item in evidence["penalties"])
+        )
 
     def test_scoring_rewards_downstream_manufacturer_fit(self) -> None:
         scored = score_lead(
