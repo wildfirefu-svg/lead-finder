@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 PASSING_CLASSIFICATIONS = {"buyer", "manufacturer", "distributor"}
 PASSING_MARKET_STATUSES = {"passed", "pass", "matched", "ok", "positive"}
@@ -21,23 +22,20 @@ def evidence_json(evidence: dict) -> str:
 
 def parse_score_evidence(value: str | dict | None) -> dict:
     if isinstance(value, dict):
-        return {
-            "additions": list(value.get("additions", [])),
-            "penalties": list(value.get("penalties", [])),
-            "matched_terms": list(value.get("matched_terms", [])),
-        }
-    if not value:
-        return {"additions": [], "penalties": [], "matched_terms": []}
-    try:
-        parsed = json.loads(str(value))
-    except json.JSONDecodeError:
-        return {"additions": [], "penalties": [], "matched_terms": []}
+        parsed = value
+    else:
+        if not value:
+            return {"additions": [], "penalties": [], "matched_terms": []}
+        try:
+            parsed = json.loads(str(value))
+        except json.JSONDecodeError:
+            return {"additions": [], "penalties": [], "matched_terms": []}
     if not isinstance(parsed, dict):
         return {"additions": [], "penalties": [], "matched_terms": []}
     return {
-        "additions": list(parsed.get("additions", [])),
-        "penalties": list(parsed.get("penalties", [])),
-        "matched_terms": list(parsed.get("matched_terms", [])),
+        "additions": _list_value(parsed.get("additions")),
+        "penalties": _list_value(parsed.get("penalties")),
+        "matched_terms": _list_value(parsed.get("matched_terms")),
     }
 
 
@@ -70,7 +68,12 @@ def lead_classification_label(category: str | None) -> str:
 def enrichment_eligible(lead: dict, *, min_score: int = 50) -> bool:
     if str(lead.get("status", "") or "") != "Qualified":
         return False
-    if int(lead.get("match_score", 0) or 0) < int(min_score):
+    try:
+        score = float(lead.get("match_score", 0) or 0)
+        threshold = float(min_score)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(score) or not math.isfinite(threshold) or score < threshold:
         return False
     if not str(lead.get("website", "") or "").strip():
         return False
@@ -78,12 +81,16 @@ def enrichment_eligible(lead: dict, *, min_score: int = 50) -> bool:
     if classification not in PASSING_CLASSIFICATIONS:
         return False
     market_status = str(lead.get("market_fit_status", "") or "").strip().lower()
-    if market_status and market_status not in PASSING_MARKET_STATUSES:
+    if market_status not in PASSING_MARKET_STATUSES:
         return False
     crawl_status = str(lead.get("crawl_status", "") or "").strip().lower()
     if crawl_status and crawl_status not in PASSING_CRAWL_STATUSES:
         return False
     return True
+
+
+def _list_value(value: object) -> list:
+    return list(value) if isinstance(value, list) else []
 
 
 def _format_item(item: dict, *, positive: bool) -> str:

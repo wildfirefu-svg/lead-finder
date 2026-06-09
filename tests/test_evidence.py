@@ -19,6 +19,21 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(evidence["penalties"], [])
         self.assertEqual(evidence["matched_terms"], [])
 
+    def test_parse_score_evidence_normalizes_non_list_fields(self) -> None:
+        evidence = parse_score_evidence(
+            json.dumps(
+                {
+                    "additions": None,
+                    "penalties": 3,
+                    "matched_terms": "abc",
+                }
+            )
+        )
+
+        self.assertEqual(evidence["additions"], [])
+        self.assertEqual(evidence["penalties"], [])
+        self.assertEqual(evidence["matched_terms"], [])
+
     def test_score_reason_text_formats_additions_and_penalties(self) -> None:
         text = score_reason_text(
             {
@@ -69,6 +84,31 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(enrichment_eligible(weak, min_score=50))
         self.assertFalse(enrichment_eligible(failed_market, min_score=50))
         self.assertFalse(enrichment_eligible(failed_crawl, min_score=50))
+
+    def test_enrichment_eligible_rejects_non_numeric_score(self) -> None:
+        lead = {
+            "status": "Qualified",
+            "match_score": "not-a-score",
+            "website": "https://buyer.example",
+            "classification_status": "buyer",
+            "market_fit_status": "passed",
+            "crawl_status": "ok",
+        }
+
+        self.assertFalse(enrichment_eligible(lead, min_score=50))
+
+    def test_enrichment_eligible_requires_explicit_market_pass_but_allows_blank_crawl(self) -> None:
+        lead = {
+            "status": "Qualified",
+            "match_score": 75,
+            "website": "https://buyer.example",
+            "classification_status": "buyer",
+            "market_fit_status": "",
+            "crawl_status": "",
+        }
+
+        self.assertFalse(enrichment_eligible(lead, min_score=50))
+        self.assertTrue(enrichment_eligible({**lead, "market_fit_status": "passed"}, min_score=50))
 
 
 if __name__ == "__main__":
