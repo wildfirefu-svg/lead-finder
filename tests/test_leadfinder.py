@@ -533,6 +533,31 @@ class LeadFinderTests(unittest.TestCase):
         self.assertEqual(first["id"], by_email["id"])
         self.assertEqual(first["id"], by_company["id"])
 
+    def test_db_persists_evidence_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                created, was_created = create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Evidence Buyer",
+                        "website": "https://buyer.example",
+                        "classification_status": "buyer",
+                        "classification_evidence": "downstream usage evidence",
+                        "score_evidence": '{"additions":[],"penalties":[],"matched_terms":[]}',
+                        "review_status": "high_confidence",
+                    },
+                )
+                rows = list_leads(db)
+            finally:
+                db.close()
+
+        self.assertTrue(was_created)
+        self.assertEqual(created["classification_status"], "buyer")
+        self.assertEqual(rows[0]["classification_evidence"], "downstream usage evidence")
+        self.assertEqual(rows[0]["review_status"], "high_confidence")
+        self.assertIn("additions", rows[0]["score_evidence"])
+
     def test_serper_payload_maps_to_leads_for_offline_discovery(self) -> None:
         payload = {
             "organic": [
