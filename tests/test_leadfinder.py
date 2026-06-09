@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
 import tempfile
 import unittest
 import urllib.error
@@ -9,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from leadfinder.classifier import classify_company_site
-from leadfinder.db import connect, create_or_skip_lead, list_leads
+from leadfinder.db import connect, create_or_skip_lead, list_leads, update_lead
 from leadfinder.enrich import (
     clean_company_name,
     extract_emails,
@@ -556,7 +557,93 @@ class LeadFinderTests(unittest.TestCase):
         self.assertEqual(created["classification_status"], "buyer")
         self.assertEqual(rows[0]["classification_evidence"], "downstream usage evidence")
         self.assertEqual(rows[0]["review_status"], "high_confidence")
-        self.assertIn("additions", rows[0]["score_evidence"])
+        self.assertEqual(
+            rows[0]["score_evidence"],
+            '{"additions":[],"penalties":[],"matched_terms":[]}',
+        )
+
+    def test_db_migrates_existing_lead_for_evidence_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "leadfinder.sqlite"
+            legacy_db = sqlite3.connect(path)
+            try:
+                legacy_db.executescript(
+                    """
+                    CREATE TABLE leads (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      source_type TEXT NOT NULL DEFAULT 'Website',
+                      source_name TEXT NOT NULL DEFAULT '',
+                      company_name TEXT NOT NULL DEFAULT '',
+                      country_region TEXT NOT NULL DEFAULT '',
+                      market_region TEXT NOT NULL DEFAULT '',
+                      website TEXT NOT NULL DEFAULT '',
+                      website_domain TEXT NOT NULL DEFAULT '',
+                      source_url TEXT NOT NULL DEFAULT '',
+                      contact_name TEXT NOT NULL DEFAULT '',
+                      email TEXT NOT NULL DEFAULT '',
+                      industry TEXT NOT NULL DEFAULT '',
+                      product_fit TEXT NOT NULL DEFAULT 'Both',
+                      fit_reason TEXT NOT NULL DEFAULT '',
+                      match_score INTEGER NOT NULL DEFAULT 0,
+                      status TEXT NOT NULL DEFAULT 'Discovered',
+                      crawl_status TEXT NOT NULL DEFAULT '',
+                      classification_status TEXT NOT NULL DEFAULT '',
+                      market_fit_status TEXT NOT NULL DEFAULT '',
+                      email_verification_status TEXT NOT NULL DEFAULT '',
+                      crm_sync_status TEXT NOT NULL DEFAULT '',
+                      notes TEXT NOT NULL DEFAULT '',
+                      raw_text TEXT NOT NULL DEFAULT '',
+                      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    );
+                    INSERT INTO leads (
+                      company_name,
+                      website,
+                      website_domain,
+                      classification_status
+                    ) VALUES (
+                      'Legacy Buyer',
+                      'https://legacy.example',
+                      'legacy.example',
+                      'buyer'
+                    );
+                    """
+                )
+                legacy_db.commit()
+            finally:
+                legacy_db.close()
+
+            db = connect(path)
+            try:
+                rows = list_leads(db)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["company_name"], "Legacy Buyer")
+                self.assertEqual(rows[0]["classification_evidence"], "")
+                self.assertEqual(rows[0]["score_evidence"], "")
+                self.assertEqual(rows[0]["review_status"], "")
+
+                update_lead(
+                    db,
+                    rows[0]["id"],
+                    {
+                        "classification_evidence": "legacy downstream evidence",
+                        "score_evidence": '{"additions":["legacy"],"penalties":[],"matched_terms":[]}',
+                        "review_status": "reviewed",
+                    },
+                )
+                updated = list_leads(db)[0]
+            finally:
+                db.close()
+
+        self.assertEqual(
+            updated["classification_evidence"],
+            "legacy downstream evidence",
+        )
+        self.assertEqual(
+            updated["score_evidence"],
+            '{"additions":["legacy"],"penalties":[],"matched_terms":[]}',
+        )
+        self.assertEqual(updated["review_status"], "reviewed")
 
     def test_serper_payload_maps_to_leads_for_offline_discovery(self) -> None:
         payload = {
