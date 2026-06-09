@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .evidence import lead_classification_label
+
 
 DOWNSTREAM_TERMS = [
     "composites manufacturer",
@@ -141,8 +143,10 @@ def classify_company_site(lead: dict) -> dict:
 def classification_note(classification: dict) -> str:
     evidence = ", ".join(classification.get("evidence", []))
     suffix = f"; evidence={evidence}" if evidence else ""
+    label = classification.get("label") or lead_classification_label(classification.get("category"))
     return (
         f"Site classification: {classification['category']} "
+        f"label={label} "
         f"confidence={classification['confidence']} "
         f"passed={classification['passed']} "
         f"reason={classification['reason']}{suffix}"
@@ -150,10 +154,16 @@ def classification_note(classification: dict) -> str:
 
 
 def _result(category: str, passed: bool, confidence: int, evidence: list[str], reason: str) -> dict:
+    unique_evidence = list(dict.fromkeys(evidence))[:8]
+    label = lead_classification_label(category)
+    evidence_text = ", ".join(unique_evidence)
+    explanation = f"{reason}; evidence={evidence_text}" if evidence_text else reason
     return {
         "category": category,
+        "label": label,
         "passed": passed,
         "confidence": confidence,
-        "evidence": list(dict.fromkeys(evidence))[:8],
+        "evidence": unique_evidence,
         "reason": reason,
+        "explanation": explanation,
     }

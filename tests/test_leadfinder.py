@@ -270,6 +270,32 @@ class LeadFinderTests(unittest.TestCase):
         self.assertTrue(classification["passed"])
         self.assertEqual(classification["category"], "downstream_customer")
 
+    def test_classifier_returns_normalized_buyer_label_and_explanation(self) -> None:
+        classification = classify_company_site(
+            {
+                "raw_text": "Pultrusion manufacturer making FRP profiles. Contact us for capabilities.",
+                "website": "https://buyer.example",
+            }
+        )
+
+        self.assertTrue(classification["passed"])
+        self.assertEqual(classification["category"], "downstream_customer")
+        self.assertEqual(classification["label"], "buyer")
+        self.assertIn("downstream usage evidence", classification["explanation"])
+        self.assertIn("pultrusion manufacturer", classification["evidence"])
+
+    def test_classifier_returns_supplier_label_and_explanation(self) -> None:
+        classification = classify_company_site(
+            {
+                "raw_text": "Fiberglass roving manufacturer and exporter with roving factory production.",
+                "website": "https://supplier.example",
+            }
+        )
+
+        self.assertFalse(classification["passed"])
+        self.assertEqual(classification["label"], "supplier")
+        self.assertIn("supplier/manufacturer source", classification["explanation"])
+
     def test_classifier_passes_pultrusion_application_sites(self) -> None:
         classification = classify_company_site(
             {
