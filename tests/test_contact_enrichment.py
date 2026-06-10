@@ -32,6 +32,10 @@ class ContactEnrichmentTests(unittest.TestCase):
                         "company_name": "Qualified Buyer",
                         "website": "https://buyer.example",
                         "status": "Qualified",
+                        "match_score": 75,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
                     },
                 )
                 create_or_skip_lead(
@@ -62,6 +66,10 @@ class ContactEnrichmentTests(unittest.TestCase):
                         "company_name": "Qualified Buyer",
                         "website": "https://buyer.example",
                         "status": "Qualified",
+                        "match_score": 75,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
                     },
                 )
                 result = enrich_qualified_emails(db, InvalidHunter(), limit=5)
@@ -85,6 +93,10 @@ class ContactEnrichmentTests(unittest.TestCase):
                         "website": "https://buyer.example",
                         "status": "Qualified",
                         "notes": "Hunter domain search: no email returned",
+                        "match_score": 75,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
                     },
                 )
                 result = enrich_qualified_emails(db, FakeHunter(), limit=5)
@@ -113,6 +125,10 @@ class ContactEnrichmentTests(unittest.TestCase):
                         "website": "https://buyer.example",
                         "email": "sales@buyer.example",
                         "status": "Qualified",
+                        "match_score": 75,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
                     },
                 )
                 create_or_skip_lead(
@@ -123,6 +139,10 @@ class ContactEnrichmentTests(unittest.TestCase):
                         "email": "sales@verified.example",
                         "status": "Qualified",
                         "email_verification_status": "valid",
+                        "match_score": 75,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
                     },
                 )
                 result = verify_existing_qualified_emails(db, hunter, limit=5)
@@ -135,6 +155,129 @@ class ContactEnrichmentTests(unittest.TestCase):
         self.assertEqual(hunter.domain_calls, 0)
         self.assertEqual(rows["Qualified Buyer"]["email_verification_status"], "valid")
         self.assertEqual(rows["Already Verified"]["email_verification_status"], "valid")
+
+    def test_hunter_enrichment_skips_supplier_unknown_and_crawl_failures(self) -> None:
+        class CountingHunter(FakeHunter):
+            def __init__(self) -> None:
+                self.domain_calls = 0
+
+            def domain_search(self, domain: str) -> dict:
+                self.domain_calls += 1
+                return super().domain_search(domain)
+
+        hunter = CountingHunter()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Eligible Buyer",
+                        "website": "https://buyer.example",
+                        "status": "Qualified",
+                        "match_score": 75,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
+                    },
+                )
+                create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Supplier",
+                        "website": "https://supplier.example",
+                        "status": "Qualified",
+                        "match_score": 85,
+                        "classification_status": "supplier",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
+                    },
+                )
+                create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Unknown",
+                        "website": "https://unknown.example",
+                        "status": "Qualified",
+                        "match_score": 80,
+                        "classification_status": "unknown",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
+                    },
+                )
+                create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Crawl Failed",
+                        "website": "https://failed.example",
+                        "status": "Qualified",
+                        "match_score": 80,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "error",
+                    },
+                )
+                result = enrich_qualified_emails(db, hunter, limit=10)
+                rows = {lead["company_name"]: lead for lead in list_leads(db)}
+            finally:
+                db.close()
+
+        self.assertEqual(result["attempted"], 1)
+        self.assertEqual(hunter.domain_calls, 1)
+        self.assertEqual(rows["Eligible Buyer"]["email"], "sales@buyer.example")
+        self.assertEqual(rows["Supplier"]["email"], "")
+        self.assertEqual(rows["Unknown"]["email"], "")
+        self.assertEqual(rows["Crawl Failed"]["email"], "")
+
+    def test_existing_email_verification_uses_same_credit_gate(self) -> None:
+        class CountingHunter(FakeHunter):
+            def __init__(self) -> None:
+                self.verify_calls = 0
+
+            def verify_email(self, email: str) -> dict:
+                self.verify_calls += 1
+                return super().verify_email(email)
+
+        hunter = CountingHunter()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Eligible Buyer",
+                        "website": "https://buyer.example",
+                        "email": "sales@buyer.example",
+                        "status": "Qualified",
+                        "match_score": 75,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
+                    },
+                )
+                create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Supplier",
+                        "website": "https://supplier.example",
+                        "email": "sales@supplier.example",
+                        "status": "Qualified",
+                        "match_score": 85,
+                        "classification_status": "supplier",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
+                    },
+                )
+                result = verify_existing_qualified_emails(db, hunter, limit=10)
+                rows = {lead["company_name"]: lead for lead in list_leads(db)}
+            finally:
+                db.close()
+
+        self.assertEqual(result["attempted"], 1)
+        self.assertEqual(result["valid"], 1)
+        self.assertEqual(hunter.verify_calls, 1)
+        self.assertEqual(rows["Eligible Buyer"]["email_verification_status"], "valid")
+        self.assertEqual(rows["Supplier"]["email_verification_status"], "")
 
 
 if __name__ == "__main__":

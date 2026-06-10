@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .db import list_leads, update_lead
 from .enrich import normalize_domain
+from .evidence import enrichment_eligible
 from .hunter import hunter_domain_to_email, hunter_verification_note
 from .scoring import score_lead
 from .security import sanitize_error
@@ -12,6 +13,7 @@ def enrich_qualified_emails(db, hunter_client, *, limit: int = 5) -> dict:
         lead
         for lead in list_leads(db, status="Qualified")
         if not str(lead.get("email", "") or "").strip()
+        and enrichment_eligible(lead, min_score=50)
         and normalize_domain(lead.get("website", ""))
         and "hunter domain search:" not in str(lead.get("notes", "") or "").lower()
     ][: max(0, int(limit))]
@@ -73,6 +75,7 @@ def verify_existing_qualified_emails(db, hunter_client, *, limit: int = 10) -> d
         lead
         for lead in list_leads(db, status="Qualified")
         if str(lead.get("email", "") or "").strip()
+        and enrichment_eligible(lead, min_score=50)
         and str(lead.get("email_verification_status", "") or "").strip().lower()
         not in {"valid", "invalid", "not_found"}
     ][: max(0, int(limit))]
