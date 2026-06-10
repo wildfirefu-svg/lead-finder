@@ -17,6 +17,11 @@ from leadfinder.webapp import make_app
 
 
 class WebAppTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db_path = Path(self.tmp.name) / "leadfinder.sqlite"
+
     def test_api_leads_returns_json_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "leadfinder.sqlite"
@@ -84,6 +89,115 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("验证已有邮箱", html)
         self.assertIn("701912", html)
         self.assertIn("北美", html)
+
+    def test_homepage_includes_accuracy_review_filters(self) -> None:
+        app = make_app(self.db_path)
+        status, headers, body = app.handle("GET", "/", b"")
+        html = body.decode("utf-8")
+
+        self.assertEqual(status, 200)
+        self.assertIn("高置信 Qualified", html)
+        self.assertIn("待人工复核", html)
+        self.assertIn("疑似供应商误判", html)
+        self.assertIn("抓取失败", html)
+
+    def test_api_leads_supports_review_filter(self) -> None:
+        db = connect(self.db_path)
+        try:
+            create_or_skip_lead(
+                db,
+                {
+                    "company_name": "High Confidence",
+                    "status": "Qualified",
+                    "match_score": 82,
+                    "classification_status": "buyer",
+                    "market_fit_status": "passed",
+                    "crawl_status": "ok",
+                    "review_status": "high_confidence",
+                },
+            )
+            create_or_skip_lead(
+                db,
+                {
+                    "company_name": "Needs Review",
+                    "status": "Discovered",
+                    "match_score": 45,
+                    "classification_status": "unknown",
+                    "review_status": "needs_review",
+                },
+            )
+        finally:
+            db.close()
+
+        app = make_app(self.db_path)
+        status, headers, body = app.handle("GET", "/api/leads?review=high_confidence", b"")
+        payload = json.loads(body.decode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual([lead["company_name"] for lead in payload["leads"]], ["High Confidence"])
+
+    def test_api_leads_decorates_score_evidence(self) -> None:
+        db = connect(self.db_path)
+        try:
+            create_or_skip_lead(
+                db,
+                {
+                    "company_name": "Explained Buyer",
+                    "score_evidence": json.dumps(
+                        {
+                            "additions": [
+                                {"points": 20, "reason": "buyer language", "terms": ["fiberglass"]}
+                            ],
+                            "penalties": [
+                                {"points": -10, "reason": "supplier language", "terms": ["manufacturer"]}
+                            ],
+                        }
+                    ),
+                },
+            )
+        finally:
+            db.close()
+
+        status, _, body = make_app(self.db_path).handle("GET", "/api/leads", b"")
+        lead = json.loads(body.decode("utf-8"))["leads"][0]
+
+        self.assertEqual(status, 200)
+        self.assertIn("+20 buyer language: fiberglass", lead["score_explanation"])
+        self.assertIn("-10 supplier language: manufacturer", lead["score_explanation"])
+
+    def test_api_review_filter_applies_limit_after_filtering(self) -> None:
+        db = connect(self.db_path)
+        try:
+            create_or_skip_lead(
+                db,
+                {
+                    "company_name": "First Nonmatch",
+                    "status": "Qualified",
+                    "match_score": 90,
+                    "review_status": "high_confidence",
+                },
+            )
+            create_or_skip_lead(
+                db,
+                {
+                    "company_name": "Later Match",
+                    "status": "Discovered",
+                    "match_score": 40,
+                    "review_status": "needs_review",
+                },
+            )
+        finally:
+            db.close()
+
+        status, _, body = make_app(self.db_path).handle(
+            "GET",
+            "/api/leads?review=needs_review&limit=1",
+            b"",
+        )
+        payload = json.loads(body.decode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual([lead["company_name"] for lead in payload["leads"]], ["Later Match"])
 
     def test_api_campaign_runs_without_serper(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

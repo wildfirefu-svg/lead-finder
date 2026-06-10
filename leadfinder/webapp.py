@@ -13,6 +13,7 @@ from .config import settings
 from .contact_enrichment import enrich_qualified_emails, verify_existing_qualified_emails
 from .crm import crm_status, sync_verified_qualified
 from .db import connect, latest_provider_usage, list_leads, stats, update_lead
+from .evidence import enrichment_eligible, parse_score_evidence, score_reason_text
 from .exporter import export_csv_bytes
 from .hunter import HunterClient
 from .requalify import RequalifyOptions, requalify_leads
@@ -297,6 +298,11 @@ INDEX_HTML = """<!doctype html>
         <option value="Rejected">已拒绝</option>
         <option value="Error">错误</option>
       </select>
+      <button type="button" data-review="">全部复核状态</button>
+      <button type="button" data-review="high_confidence">高置信 Qualified</button>
+      <button type="button" data-review="needs_review">待人工复核</button>
+      <button type="button" data-review="suspected_supplier">疑似供应商误判</button>
+      <button type="button" data-review="crawl_failed">抓取失败</button>
       <button id="refresh" type="button">刷新</button>
       <button id="requalify" type="button">批量复核旧线索</button>
       <button id="enrich-qualified" type="button">补全合格线索邮箱</button>
@@ -453,6 +459,7 @@ INDEX_HTML = """<!doctype html>
     };
     const selectedRegions = new Set(['北美']);
     const selectedCountries = new Set(regionMarkets['北美'].map(([value]) => value));
+    const state = {review: ''};
 
     function esc(value) {
       return String(value || '').replace(/[&<>"']/g, (char) => ({
@@ -555,7 +562,10 @@ INDEX_HTML = """<!doctype html>
 
     async function loadLeads() {
       const filter = document.getElementById('status-filter').value;
-      const url = filter ? `/api/leads?limit=200&status=${encodeURIComponent(filter)}` : '/api/leads?limit=200';
+      const params = new URLSearchParams({limit: '200'});
+      if (filter) params.set('status', filter);
+      if (state.review) params.set('review', state.review);
+      const url = `/api/leads?${params.toString()}`;
       const response = await fetch(url);
       const payload = await response.json();
       const leads = payload.leads || [];
@@ -568,6 +578,12 @@ INDEX_HTML = """<!doctype html>
       tbody.innerHTML = leads.map((lead) => {
         const scoreClass = Number(lead.match_score || 0) >= 50 ? 'score' : 'score low';
         const website = lead.website || '#';
+        const evidence = [
+          lead.review_status ? `复核: ${lead.review_status}` : '',
+          lead.classification_status ? `分类: ${lead.classification_status}` : '',
+          lead.classification_evidence ? `分类依据: ${lead.classification_evidence}` : '',
+          lead.score_explanation ? `评分依据: ${lead.score_explanation}` : ''
+        ].filter(Boolean).join(' | ');
         return `
           <tr>
             <td><span class="${scoreClass}">${lead.match_score || 0}</span></td>
@@ -582,7 +598,7 @@ INDEX_HTML = """<!doctype html>
             <td class="state">${esc(stateLabel(lead.email_verification_status))}</td>
             <td class="state">${esc(stateLabel(lead.crm_sync_status))}</td>
             <td class="source" title="${esc(lead.source_name)}">${esc(sourceLabel(lead.source_name))}</td>
-            <td class="reason">${esc(lead.fit_reason)}</td>
+            <td class="reason">${esc(lead.fit_reason)}${evidence ? `<div>${esc(evidence)}</div>` : ''}</td>
           </tr>
         `;
       }).join('');
@@ -729,6 +745,10 @@ INDEX_HTML = """<!doctype html>
 
     document.getElementById('refresh').addEventListener('click', loadLeads);
     document.getElementById('status-filter').addEventListener('change', loadLeads);
+    document.querySelectorAll('[data-review]').forEach((button) => button.addEventListener('click', () => {
+      state.review = button.getAttribute('data-review') || '';
+      loadLeads();
+    }));
     document.getElementById('run-campaign').addEventListener('click', runCampaign);
     document.getElementById('requalify').addEventListener('click', requalifyExistingLeads);
     document.getElementById('enrich-qualified').addEventListener('click', enrichQualifiedEmails);
@@ -764,13 +784,17 @@ class LocalLeadApp:
         if method == "GET" and parsed.path == "/api/leads":
             query = parse_qs(parsed.query)
             status = query.get("status", [None])[0]
+            review = query.get("review", [None])[0]
             limit_text = query.get("limit", ["100"])[0]
             limit = max(1, min(int(limit_text), 500))
             db = connect(self.db_path)
             try:
-                leads = list_leads(db, status=status, limit=limit)
+                leads = list_leads(db, status=status, limit=500 if review else limit)
             finally:
                 db.close()
+            leads = [_decorate_lead_for_display(lead) for lead in leads]
+            if review:
+                leads = [lead for lead in leads if lead["review_status"] == review][:limit]
             return self.json_response({"leads": leads})
 
         if method == "GET" and parsed.path == "/api/stats":
@@ -957,6 +981,25 @@ class LocalLeadApp:
             {"Content-Type": "application/json; charset=utf-8"},
             json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         )
+
+
+def _decorate_lead_for_display(lead: dict) -> dict:
+    evidence = parse_score_evidence(lead.get("score_evidence", ""))
+    display = dict(lead)
+    display["score_explanation"] = score_reason_text(evidence)
+    if not display.get("review_status"):
+        display["review_status"] = _review_status(display)
+    return display
+
+
+def _review_status(lead: dict) -> str:
+    if str(lead.get("crawl_status", "") or "").lower() not in {"", "ok", "success", "passed", "fetched"}:
+        return "crawl_failed"
+    if str(lead.get("classification_status", "") or "").lower() == "supplier":
+        return "suspected_supplier"
+    if enrichment_eligible(lead, min_score=50):
+        return "high_confidence"
+    return "needs_review"
 
 
 def make_app(db_path: str | Path) -> LocalLeadApp:
