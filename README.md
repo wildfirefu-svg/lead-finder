@@ -79,9 +79,18 @@ Use small limits first:
 python cli.py campaign --market-limit 1 --per-market-limit 3
 ```
 
+## Accuracy gates
+
+Lead Finder qualifies leads through website evidence before spending contact-enrichment credits.
+
+- Classification labels distinguish buyers, downstream manufacturers, distributors, suppliers, directories, and unknown sites.
+- Score evidence records additions and penalties so each Qualified or Rejected decision can be reviewed.
+- Hunter and Apollo enrichment should run only for Qualified leads that pass classification, market fit, crawl status, and score gates.
+- The workbench review filters separate high-confidence Qualified leads, manual-review leads, suspected supplier false positives, and crawl failures.
+
 ## Notes
 
 - v1 only collects public company leads and exports CSV.
-- v1 does not send emails or write into the CRM database.
+- The workbench can sync verified Qualified leads into the local CRM. It does not send emails automatically.
 - Apollo.io, Snov.io, and Bright Data are optional sources, not zero-cost core dependencies.
 - If UN Comtrade is unavailable, use `discover --country <COUNTRY>` with manual target markets.
