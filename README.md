@@ -85,12 +85,12 @@ Lead Finder qualifies leads through website evidence before spending contact-enr
 
 - Classification labels distinguish buyers, downstream manufacturers, distributors, suppliers, directories, and unknown sites.
 - Score evidence records additions and penalties so each Qualified or Rejected decision can be reviewed.
-- Hunter and Apollo enrichment should run only for Qualified leads that pass classification, market fit, crawl status, and score gates.
+- Hunter enrichment and automated campaign-time Apollo lookup should run only for Qualified leads that pass classification, market fit, crawl status, and score gates.
 - The workbench review filters separate high-confidence Qualified leads, manual-review leads, suspected supplier false positives, and crawl failures.
 
 ## Notes
 
-- v1 only collects public company leads and exports CSV.
-- The workbench can sync verified Qualified leads into the local CRM. It does not send emails automatically.
+- v1 collects public company leads, exports CRM-compatible CSV, and can sync verified Qualified leads to the local CRM.
+- It does not send emails automatically.
 - Apollo.io, Snov.io, and Bright Data are optional sources, not zero-cost core dependencies.
 - If UN Comtrade is unavailable, use `discover --country <COUNTRY>` with manual target markets.
