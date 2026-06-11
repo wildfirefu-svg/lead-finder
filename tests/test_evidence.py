@@ -7,6 +7,7 @@ from leadfinder.evidence import (
     enrichment_eligible,
     lead_classification_label,
     parse_score_evidence,
+    review_status_for_lead,
     score_reason_text,
 )
 
@@ -124,6 +125,24 @@ class EvidenceTests(unittest.TestCase):
 
         self.assertFalse(enrichment_eligible(lead, min_score=50))
         self.assertTrue(enrichment_eligible({**lead, "market_fit_status": "passed"}, min_score=50))
+
+    def test_review_status_prioritizes_crawl_failure_before_supplier(self) -> None:
+        lead = {
+            "status": "Rejected",
+            "classification_status": "supplier",
+            "crawl_status": "error",
+        }
+
+        self.assertEqual(review_status_for_lead(lead), "crawl_failed")
+
+    def test_review_status_prioritizes_supplier_before_general_review(self) -> None:
+        lead = {
+            "status": "Rejected",
+            "classification_status": "supplier",
+            "crawl_status": "ok",
+        }
+
+        self.assertEqual(review_status_for_lead(lead), "suspected_supplier")
 
 
 if __name__ == "__main__":

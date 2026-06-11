@@ -13,7 +13,7 @@ from .config import settings
 from .contact_enrichment import enrich_qualified_emails, verify_existing_qualified_emails
 from .crm import crm_status, sync_verified_qualified
 from .db import connect, latest_provider_usage, list_leads, stats, update_lead
-from .evidence import enrichment_eligible, parse_score_evidence, score_reason_text
+from .evidence import parse_score_evidence, review_status_for_lead, score_reason_text
 from .exporter import export_csv_bytes
 from .hunter import HunterClient
 from .requalify import RequalifyOptions, requalify_leads
@@ -304,6 +304,8 @@ INDEX_HTML = """<!doctype html>
       <button type="button" data-review="needs_review">待人工复核</button>
       <button type="button" data-review="suspected_supplier">疑似供应商误判</button>
       <button type="button" data-review="crawl_failed">抓取失败</button>
+      <button id="previous-page" type="button" disabled>上一页</button>
+      <button id="next-page" type="button">下一页</button>
       <button id="refresh" type="button">刷新</button>
       <button id="requalify" type="button">批量复核旧线索</button>
       <button id="enrich-qualified" type="button">补全合格线索邮箱</button>
@@ -460,7 +462,8 @@ INDEX_HTML = """<!doctype html>
     };
     const selectedRegions = new Set(['北美']);
     const selectedCountries = new Set(regionMarkets['北美'].map(([value]) => value));
-    const state = {review: ''};
+    const state = {review: '', offset: 0, limit: 200};
+    let currentResultLength = 0;
 
     function esc(value) {
       return String(value || '').replace(/[&<>"']/g, (char) => ({
@@ -563,13 +566,17 @@ INDEX_HTML = """<!doctype html>
 
     async function loadLeads() {
       const filter = document.getElementById('status-filter').value;
-      const params = new URLSearchParams({limit: '200'});
+      const params = new URLSearchParams({limit: String(state.limit)});
+      params.set('offset', String(state.offset));
       if (filter) params.set('status', filter);
       if (state.review) params.set('review', state.review);
       const url = `/api/leads?${params.toString()}`;
       const response = await fetch(url);
       const payload = await response.json();
       const leads = payload.leads || [];
+      currentResultLength = leads.length;
+      document.getElementById('previous-page').disabled = state.offset === 0;
+      document.getElementById('next-page').disabled = currentResultLength !== state.limit;
       const tbody = document.getElementById('leads');
       if (!leads.length) {
         tbody.innerHTML = '<tr><td class="empty" colspan="13">当前视图没有线索。</td></tr>';
@@ -745,11 +752,24 @@ INDEX_HTML = """<!doctype html>
     }
 
     document.getElementById('refresh').addEventListener('click', loadLeads);
-    document.getElementById('status-filter').addEventListener('change', loadLeads);
+    document.getElementById('status-filter').addEventListener('change', () => {
+      state.offset = 0;
+      loadLeads();
+    });
     document.querySelectorAll('[data-review]').forEach((button) => button.addEventListener('click', () => {
       state.review = button.getAttribute('data-review') || '';
+      state.offset = 0;
       loadLeads();
     }));
+    document.getElementById('previous-page').addEventListener('click', () => {
+      state.offset = Math.max(0, state.offset - state.limit);
+      loadLeads();
+    });
+    document.getElementById('next-page').addEventListener('click', () => {
+      if (currentResultLength !== state.limit) return;
+      state.offset += state.limit;
+      loadLeads();
+    });
     document.getElementById('run-campaign').addEventListener('click', runCampaign);
     document.getElementById('requalify').addEventListener('click', requalifyExistingLeads);
     document.getElementById('enrich-qualified').addEventListener('click', enrichQualifiedEmails);
@@ -783,35 +803,47 @@ class LocalLeadApp:
             )
 
         if method == "GET" and parsed.path == "/api/leads":
-            query = parse_qs(parsed.query)
+            query = parse_qs(parsed.query, keep_blank_values=True)
             status = query.get("status", [None])[0]
             review = query.get("review", [None])[0]
             limit_text = query.get("limit", ["100"])[0]
             limit = max(1, min(int(limit_text), 500))
+            offset_text = query.get("offset", ["0"])[0]
+            try:
+                offset = int(offset_text)
+            except (TypeError, ValueError):
+                return self.json_response({"error": "invalid offset"}, status=400)
+            if offset < 0:
+                return self.json_response({"error": "invalid offset"}, status=400)
             if review and review not in SUPPORTED_REVIEWS:
                 return self.json_response({"error": "invalid review"}, status=400)
             db = connect(self.db_path)
             try:
                 if review:
                     leads = []
-                    offset = 0
+                    source_offset = 0
+                    matching_rows = 0
                     while len(leads) < limit:
-                        chunk = list_leads(db, status=status, limit=500, offset=offset)
+                        chunk = list_leads(db, status=status, limit=500, offset=source_offset)
                         decorated = [_decorate_lead_for_display(lead) for lead in chunk]
                         for lead in decorated:
                             if lead["review_status"] == review:
+                                if matching_rows < offset:
+                                    matching_rows += 1
+                                    continue
                                 leads.append(lead)
+                                matching_rows += 1
                                 if len(leads) >= limit:
                                     break
                         if len(leads) >= limit or len(chunk) < 500:
                             break
-                        offset += 500
+                        source_offset += 500
                 else:
-                    leads = list_leads(db, status=status, limit=limit)
+                    leads = list_leads(db, status=status, limit=limit, offset=offset)
                     leads = [_decorate_lead_for_display(lead) for lead in leads]
             finally:
                 db.close()
-            return self.json_response({"leads": leads})
+            return self.json_response({"leads": leads, "offset": offset, "limit": limit})
 
         if method == "GET" and parsed.path == "/api/stats":
             db = connect(self.db_path)
@@ -984,7 +1016,11 @@ class LocalLeadApp:
                 return self.json_response({"error": "invalid status"}, status=400)
             db = connect(self.db_path)
             try:
-                lead = update_lead(db, lead_id, {"status": next_status})
+                lead = update_lead(
+                    db,
+                    lead_id,
+                    {"status": next_status, "review_status": ""},
+                )
             finally:
                 db.close()
             return self.json_response({"lead": lead})
@@ -1003,19 +1039,8 @@ def _decorate_lead_for_display(lead: dict) -> dict:
     evidence = parse_score_evidence(lead.get("score_evidence", ""))
     display = dict(lead)
     display["score_explanation"] = score_reason_text(evidence)
-    if not display.get("review_status"):
-        display["review_status"] = _review_status(display)
+    display["review_status"] = review_status_for_lead(display)
     return display
-
-
-def _review_status(lead: dict) -> str:
-    if str(lead.get("crawl_status", "") or "").lower() not in {"", "ok", "success", "passed", "fetched"}:
-        return "crawl_failed"
-    if str(lead.get("classification_status", "") or "").lower() == "supplier":
-        return "suspected_supplier"
-    if enrichment_eligible(lead, min_score=50):
-        return "high_confidence"
-    return "needs_review"
 
 
 def make_app(db_path: str | Path) -> LocalLeadApp:

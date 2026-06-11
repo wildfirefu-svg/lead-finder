@@ -16,7 +16,7 @@ from leadfinder.db import (
     list_provider_events,
     record_provider_event,
 )
-from leadfinder.campaigns import CampaignOptions, run_campaign
+from leadfinder.campaigns import CampaignOptions, _enrich_optional, run_campaign
 
 
 class CampaignSettingsTests(unittest.TestCase):
@@ -195,6 +195,15 @@ class FakeApolloClient:
         return {"people": [{"name": "Jane Buyer", "title": "Purchasing Manager"}]}
 
 
+class TrackingApolloClient(FakeApolloClient):
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def people_search(self, company: str, country: str = "", per_page: int = 3) -> dict:
+        self.calls.append((company, country))
+        return super().people_search(company, country, per_page)
+
+
 class FakeHunterClient:
     def domain_search(self, domain: str) -> dict:
         return {"data": {"emails": [{"value": "sales@buyer.example", "confidence": 92}]}}
@@ -240,6 +249,10 @@ def supplier_site_enricher(url: str, defaults: dict | None = None, **_: object) 
 
 def failing_site_enricher(url: str, defaults: dict | None = None, **_: object) -> dict:
     raise RuntimeError("crawl blocked")
+
+
+def error_status_site_enricher(url: str, defaults: dict | None = None, **_: object) -> dict:
+    return {**(defaults or {}), "website": url, "crawl_status": "error"}
 
 
 def us_site_for_canada_enricher(url: str, defaults: dict | None = None, **_: object) -> dict:
@@ -435,6 +448,10 @@ class CampaignRunnerTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertGreaterEqual(rows[0]["match_score"], 50)
         self.assertEqual(rows[0]["status"], "Qualified")
+        self.assertEqual(rows[0]["classification_status"], "buyer")
+        self.assertTrue(rows[0]["classification_evidence"])
+        self.assertIsInstance(json.loads(rows[0]["score_evidence"]), dict)
+        self.assertEqual(rows[0]["review_status"], "high_confidence")
 
     def test_campaign_skips_supplier_sites_before_contact_enrichment(self) -> None:
         hunter = TrackingHunterClient()
@@ -496,6 +513,75 @@ class CampaignRunnerTests(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(hunter.calls, [])
         self.assertTrue(any(event["provider"] == "Site Classifier" and event["status"] == "error" for event in events))
+
+    def test_campaign_skips_explicit_crawl_error_before_paid_enrichment(self) -> None:
+        apollo = TrackingApolloClient()
+        hunter = TrackingHunterClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                result = run_campaign(
+                    db,
+                    CampaignOptions(
+                        hs_code="701912",
+                        product="yarn",
+                        target_countries=("USA",),
+                        use_serper=True,
+                        use_apollo=True,
+                        use_hunter=True,
+                    ),
+                    serper_client=FakeSerperClient(),
+                    apollo_client=apollo,
+                    hunter_client=hunter,
+                    site_enricher=error_status_site_enricher,
+                )
+                rows = list_leads(db)
+                events = list_provider_events(db, result["run_id"])
+            finally:
+                db.close()
+
+        self.assertEqual(rows, [])
+        self.assertEqual(apollo.calls, [])
+        self.assertEqual(hunter.calls, [])
+        self.assertTrue(
+            any(
+                event["provider"] == "Site Classifier"
+                and event["event_type"] == "crawl"
+                and event["status"] == "error"
+                for event in events
+            )
+        )
+
+    def test_optional_enrichment_refuses_lead_that_fails_evidence_gate(self) -> None:
+        apollo = TrackingApolloClient()
+        hunter = TrackingHunterClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                run = create_campaign_run(db, {"name": "evidence gate"})
+                _enrich_optional(
+                    db,
+                    {
+                        "id": 1,
+                        "company_name": "Unverified Buyer",
+                        "country_region": "USA",
+                        "website": "https://buyer.example",
+                        "status": "Qualified",
+                        "match_score": 90,
+                        "classification_status": "buyer",
+                        "market_fit_status": "failed",
+                        "crawl_status": "ok",
+                    },
+                    CampaignOptions(use_apollo=True, use_hunter=True),
+                    apollo,
+                    hunter,
+                    run["id"],
+                )
+            finally:
+                db.close()
+
+        self.assertEqual(apollo.calls, [])
+        self.assertEqual(hunter.calls, [])
 
     def test_campaign_skips_country_mismatch_before_contact_enrichment(self) -> None:
         hunter = TrackingHunterClient()

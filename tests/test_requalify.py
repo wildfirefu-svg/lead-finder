@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,7 +14,7 @@ def downstream_enricher(url: str, defaults: dict | None = None, **_: object) -> 
         **(defaults or {}),
         "website": url,
         "raw_text": (
-            "Custom pultrusions and FRP profiles using fiberglass roving. "
+            "Pultrusion manufacturer making FRP profiles using fiberglass roving. "
             "Contact us. Wisconsin United States."
         ),
     }
@@ -58,6 +59,10 @@ class RequalifyTests(unittest.TestCase):
         self.assertEqual(lead["status"], "Qualified")
         self.assertIn("Site classification: downstream_customer", lead["fit_reason"])
         self.assertIn("Market fit: target=USA passed=True", lead["fit_reason"])
+        self.assertEqual(lead["classification_status"], "manufacturer")
+        self.assertTrue(lead["classification_evidence"])
+        self.assertIsInstance(json.loads(lead["score_evidence"]), dict)
+        self.assertEqual(lead["review_status"], "high_confidence")
 
     def test_requalify_rejects_supplier(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -85,6 +90,9 @@ class RequalifyTests(unittest.TestCase):
         self.assertEqual(result["rejected"], 1)
         self.assertEqual(lead["status"], "Rejected")
         self.assertIn("Site classification: supplier", lead["fit_reason"])
+        self.assertEqual(lead["classification_status"], "supplier")
+        self.assertTrue(lead["classification_evidence"])
+        self.assertEqual(lead["review_status"], "suspected_supplier")
 
     def test_requalify_skips_already_reviewed_by_default(self) -> None:
         calls = 0
@@ -154,6 +162,9 @@ class RequalifyTests(unittest.TestCase):
         self.assertEqual(result["rejected"], 1)
         self.assertEqual(lead["status"], "Rejected")
         self.assertEqual(calls, 0)
+        self.assertEqual(lead["classification_status"], "directory")
+        self.assertTrue(lead["classification_evidence"])
+        self.assertEqual(lead["review_status"], "needs_review")
 
     def test_requalify_uses_existing_evidence_when_crawl_is_empty(self) -> None:
         def empty_enricher(url: str, defaults: dict | None = None, **_: object) -> dict:
@@ -184,6 +195,42 @@ class RequalifyTests(unittest.TestCase):
         self.assertEqual(result["rejected"], 1)
         self.assertEqual(result["errors"], 0)
         self.assertEqual(lead["status"], "Rejected")
+        self.assertEqual(lead["classification_status"], "supplier")
+        self.assertTrue(lead["classification_evidence"])
+        self.assertIsInstance(json.loads(lead["score_evidence"]), dict)
+        self.assertEqual(lead["review_status"], "crawl_failed")
+
+    def test_requalify_marks_unclassified_crawl_error_with_evidence(self) -> None:
+        def failing_enricher(url: str, defaults: dict | None = None, **_: object) -> dict:
+            raise RuntimeError("crawl blocked")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                create_or_skip_lead(
+                    db,
+                    {
+                        "source_type": "Website",
+                        "company_name": "Unknown Company",
+                        "country_region": "USA",
+                        "website": "https://unknown.example",
+                    },
+                )
+                result = requalify_leads(
+                    db,
+                    RequalifyOptions(),
+                    site_enricher=failing_enricher,
+                )
+                lead = list_leads(db)[0]
+            finally:
+                db.close()
+
+        self.assertEqual(result["errors"], 1)
+        self.assertEqual(lead["status"], "Error")
+        self.assertEqual(lead["review_status"], "crawl_failed")
+        self.assertEqual(lead["classification_status"], "unknown")
+        self.assertTrue(lead["classification_evidence"])
+        self.assertIsInstance(json.loads(lead["score_evidence"]), dict)
 
     def test_requalify_continues_when_classification_has_no_market_fit(self) -> None:
         calls = 0

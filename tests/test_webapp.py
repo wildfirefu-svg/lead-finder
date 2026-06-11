@@ -53,7 +53,14 @@ class WebAppTests(unittest.TestCase):
             db_path = Path(tmp) / "leadfinder.sqlite"
             db = connect(db_path)
             try:
-                lead, _ = create_or_skip_lead(db, {"company_name": "Example Buyer", "website": "https://example.com"})
+                lead, _ = create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Example Buyer",
+                        "website": "https://example.com",
+                        "review_status": "high_confidence",
+                    },
+                )
             finally:
                 db.close()
 
@@ -72,6 +79,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body.decode("utf-8"))["lead"]["status"], "Qualified")
         self.assertEqual(rows[0]["status"], "Qualified")
+        self.assertEqual(rows[0]["review_status"], "")
 
     def test_homepage_returns_workbench_html(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +108,10 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("待人工复核", html)
         self.assertIn("疑似供应商误判", html)
         self.assertIn("抓取失败", html)
+        self.assertIn('id="previous-page"', html)
+        self.assertIn('id="next-page"', html)
+        self.assertIn("state.offset", html)
+        self.assertIn("params.set('offset'", html)
 
     def test_api_leads_supports_review_filter(self) -> None:
         db = connect(self.db_path)
@@ -108,6 +120,7 @@ class WebAppTests(unittest.TestCase):
                 db,
                 {
                     "company_name": "High Confidence",
+                    "website": "https://qualified.example",
                     "status": "Qualified",
                     "match_score": 82,
                     "classification_status": "buyer",
@@ -135,6 +148,47 @@ class WebAppTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual([lead["company_name"] for lead in payload["leads"]], ["High Confidence"])
+
+    def test_api_leads_recomputes_stale_persisted_review_status(self) -> None:
+        db = connect(self.db_path)
+        try:
+            create_or_skip_lead(
+                db,
+                {
+                    "company_name": "Rejected Supplier",
+                    "status": "Rejected",
+                    "classification_status": "supplier",
+                    "crawl_status": "ok",
+                    "review_status": "high_confidence",
+                },
+            )
+            create_or_skip_lead(
+                db,
+                {
+                    "company_name": "Rejected Buyer",
+                    "status": "Rejected",
+                    "classification_status": "buyer",
+                    "crawl_status": "ok",
+                    "review_status": "high_confidence",
+                },
+            )
+        finally:
+            db.close()
+
+        app = make_app(self.db_path)
+        _, _, supplier_body = app.handle("GET", "/api/leads?review=suspected_supplier", b"")
+        _, _, review_body = app.handle("GET", "/api/leads?review=needs_review", b"")
+        _, _, high_body = app.handle("GET", "/api/leads?review=high_confidence", b"")
+
+        self.assertEqual(
+            [lead["company_name"] for lead in json.loads(supplier_body)["leads"]],
+            ["Rejected Supplier"],
+        )
+        self.assertEqual(
+            [lead["company_name"] for lead in json.loads(review_body)["leads"]],
+            ["Rejected Buyer"],
+        )
+        self.assertEqual(json.loads(high_body)["leads"], [])
 
     def test_api_leads_rejects_unsupported_review_without_opening_database(self) -> None:
         app = make_app(self.db_path)
@@ -209,8 +263,12 @@ class WebAppTests(unittest.TestCase):
                 db,
                 {
                     "company_name": "First Nonmatch",
+                    "website": "https://qualified.example",
                     "status": "Qualified",
                     "match_score": 90,
+                    "classification_status": "buyer",
+                    "market_fit_status": "passed",
+                    "crawl_status": "ok",
                     "review_status": "high_confidence",
                 },
             )
@@ -248,6 +306,16 @@ class WebAppTests(unittest.TestCase):
             )
             db.execute(
                 """
+                UPDATE leads
+                SET website = 'https://qualified.example',
+                    classification_status = 'buyer',
+                    market_fit_status = 'passed',
+                    crawl_status = 'ok'
+                WHERE company_name LIKE 'High Confidence %'
+                """
+            )
+            db.execute(
+                """
                 INSERT INTO leads (company_name, status, match_score, review_status)
                 VALUES ('Match Beyond 500', 'Discovered', 40, 'needs_review')
                 """
@@ -268,10 +336,18 @@ class WebAppTests(unittest.TestCase):
 
     def test_api_review_filter_scans_in_bounded_chunks(self) -> None:
         first_chunk = [
-            {"company_name": f"Nonmatch {index:03d}", "review_status": "high_confidence"}
+            {
+                "company_name": f"Nonmatch {index:03d}",
+                "status": "Qualified",
+                "match_score": 90,
+                "website": "https://qualified.example",
+                "classification_status": "buyer",
+                "market_fit_status": "passed",
+                "crawl_status": "ok",
+            }
             for index in range(500)
         ]
-        second_chunk = [{"company_name": "Later Match", "review_status": "needs_review"}]
+        second_chunk = [{"company_name": "Later Match", "status": "Discovered"}]
         app = make_app(self.db_path)
 
         with patch("leadfinder.webapp.list_leads", side_effect=[first_chunk, second_chunk]) as mocked_list:
@@ -291,6 +367,64 @@ class WebAppTests(unittest.TestCase):
                 unittest.mock.call(unittest.mock.ANY, status=None, limit=500, offset=500),
             ],
         )
+
+    def test_api_leads_supports_result_offset_without_review_filter(self) -> None:
+        db = connect(self.db_path)
+        try:
+            for name in ("First", "Second", "Third"):
+                create_or_skip_lead(db, {"company_name": name})
+        finally:
+            db.close()
+
+        status, _, body = make_app(self.db_path).handle(
+            "GET",
+            "/api/leads?limit=1&offset=1",
+            b"",
+        )
+        payload = json.loads(body.decode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual([lead["company_name"] for lead in payload["leads"]], ["Second"])
+        self.assertEqual(payload["offset"], 1)
+        self.assertEqual(payload["limit"], 1)
+
+    def test_api_review_filter_supports_result_offset_beyond_source_chunk(self) -> None:
+        db = connect(self.db_path)
+        try:
+            db.executemany(
+                """
+                INSERT INTO leads (company_name, status, match_score)
+                VALUES (?, 'Discovered', 40)
+                """,
+                [(f"Needs Review {index:03d}",) for index in range(502)],
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        status, _, body = make_app(self.db_path).handle(
+            "GET",
+            "/api/leads?review=needs_review&limit=500&offset=500",
+            b"",
+        )
+        payload = json.loads(body.decode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            [lead["company_name"] for lead in payload["leads"]],
+            ["Needs Review 001", "Needs Review 000"],
+        )
+        self.assertEqual(payload["offset"], 500)
+        self.assertEqual(payload["limit"], 500)
+
+    def test_api_leads_rejects_invalid_offset(self) -> None:
+        app = make_app(self.db_path)
+
+        for offset in ("", "invalid", "-1"):
+            with self.subTest(offset=offset):
+                status, _, body = app.handle("GET", f"/api/leads?offset={offset}", b"")
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(body.decode("utf-8")), {"error": "invalid offset"})
 
     def test_api_campaign_runs_without_serper(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

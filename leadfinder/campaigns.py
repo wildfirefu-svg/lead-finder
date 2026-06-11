@@ -14,6 +14,7 @@ from .db import (
     update_lead,
 )
 from .enrich import enrich_site, normalize_domain
+from .evidence import PASSING_CRAWL_STATUSES, enrichment_eligible, review_status_for_lead
 from .hunter import hunter_domain_to_email, hunter_verification_note
 from .market_fit import market_fit_note, validate_target_market
 from .markets import fallback_markets, fetch_comtrade_markets
@@ -300,6 +301,19 @@ def _crawl_score_and_classify(lead: dict, options: CampaignOptions, site_enriche
         )
         return None
 
+    crawl_status = str(enriched.get("crawl_status", "") or "").strip().lower()
+    if crawl_status and crawl_status not in PASSING_CRAWL_STATUSES:
+        record_provider_event(
+            db,
+            run_id,
+            provider="Site Classifier",
+            event_type="crawl",
+            status="error",
+            cost_units=0,
+            message=f"{lead.get('website', '')}: crawl_status={crawl_status}",
+        )
+        return None
+
     scored = {**lead, **enriched}
     scored = {**scored, **score_lead(scored)}
     if int(scored.get("match_score") or 0) < int(options.min_score):
@@ -316,7 +330,8 @@ def _crawl_score_and_classify(lead: dict, options: CampaignOptions, site_enriche
 
     classification = classify_company_site(scored)
     note = classification_note(classification)
-    scored["classification_status"] = classification["category"]
+    scored["classification_status"] = classification["label"]
+    scored["classification_evidence"] = classification["explanation"]
     scored["notes"] = _append_note(scored.get("notes", ""), note)
     scored["fit_reason"] = _append_note(scored.get("fit_reason", ""), note)
 
@@ -370,10 +385,14 @@ def _crawl_score_and_classify(lead: dict, options: CampaignOptions, site_enriche
         message=f"{scored.get('country_region', '')}: {scored.get('website', '')}",
     )
     scored["status"] = "Qualified"
+    scored["review_status"] = review_status_for_lead(scored, min_score=options.min_score)
     return scored
 
 
 def _enrich_optional(db, lead: dict, options: CampaignOptions, apollo_client, hunter_client, run_id: int) -> None:
+    if not enrichment_eligible(lead, min_score=options.min_score):
+        return
+
     updates: dict = {}
     notes = lead.get("notes", "")
 

@@ -156,6 +156,11 @@ def classification_note(classification: dict) -> str:
 def _result(category: str, passed: bool, confidence: int, evidence: list[str], reason: str) -> dict:
     unique_evidence = list(dict.fromkeys(evidence))[:8]
     label = lead_classification_label(category)
+    if category == "downstream_customer" and any(
+        "manufacturer" in str(term).lower()
+        for term in unique_evidence
+    ):
+        label = "manufacturer"
     evidence_text = ", ".join(unique_evidence)
     explanation = f"{reason}; evidence={evidence_text}" if evidence_text else reason
     return {

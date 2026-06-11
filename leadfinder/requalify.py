@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from .classifier import classification_note, classify_company_site
 from .db import list_leads, update_lead
 from .enrich import clean_company_name, enrich_site, normalize_domain
+from .evidence import review_status_for_lead
 from .market_fit import market_fit_note, validate_target_market
 from .scoring import score_lead
 from .serper import is_excluded_discovery_domain, is_excluded_discovery_url
@@ -44,22 +45,29 @@ def requalify_leads(
             is_excluded_discovery_domain(normalize_domain(website))
             or is_excluded_discovery_url(website)
         ):
+            updates = {
+                "status": "Rejected",
+                "classification_status": "directory",
+                "classification_evidence": "excluded discovery source",
+                "score_evidence": lead.get("score_evidence", ""),
+                "fit_reason": _replace_review_notes(
+                    lead.get("fit_reason", ""),
+                    "Site classification: noise confidence=95 passed=False "
+                    "reason=excluded discovery source",
+                ),
+                "notes": _append_note(
+                    lead.get("notes", ""),
+                    "Batch review: excluded directory, marketplace, social, report, or document source",
+                ),
+            }
+            updates["review_status"] = review_status_for_lead(
+                {**lead, **updates},
+                min_score=options.min_score,
+            )
             update_lead(
                 db,
                 lead["id"],
-                {
-                    "status": "Rejected",
-                    "classification_status": "noise",
-                    "fit_reason": _replace_review_notes(
-                        lead.get("fit_reason", ""),
-                        "Site classification: noise confidence=95 passed=False "
-                        "reason=excluded discovery source",
-                    ),
-                    "notes": _append_note(
-                        lead.get("notes", ""),
-                        "Batch review: excluded directory, marketplace, social, report, or document source",
-                    ),
-                },
+                updates,
             )
             summary["rejected"] += 1
             continue
@@ -88,7 +96,6 @@ def requalify_leads(
 
         scored = {**merged, **score_lead(merged)}
         classification = classify_company_site(scored)
-        classification_text = classification_note(classification)
 
         if int(scored.get("match_score") or 0) < int(options.min_score):
             _save_review(
@@ -96,7 +103,8 @@ def requalify_leads(
                 scored,
                 status="Rejected",
                 reason=f"Batch review: score<{options.min_score}",
-                classification_text=classification_text,
+                classification=classification,
+                min_score=options.min_score,
             )
             summary["rejected"] += 1
             continue
@@ -108,7 +116,8 @@ def requalify_leads(
                 scored,
                 status=status,
                 reason=f"Batch review: {classification['reason']}",
-                classification_text=classification_text,
+                classification=classification,
+                min_score=options.min_score,
             )
             summary["rejected" if status == "Rejected" else "needs_review"] += 1
             continue
@@ -121,7 +130,8 @@ def requalify_leads(
             scored,
             status=status,
             reason=f"Batch review: {market_fit['reason']}",
-            classification_text=classification_text,
+            classification=classification,
+            min_score=options.min_score,
             market_text=market_text,
         )
         summary["qualified" if status == "Qualified" else "rejected"] += 1
@@ -159,9 +169,11 @@ def _save_review(
     *,
     status: str,
     reason: str,
-    classification_text: str,
+    classification: dict,
+    min_score: int,
     market_text: str = "",
 ) -> None:
+    classification_text = classification_note(classification)
     fit_reason = _replace_review_notes(
         lead.get("fit_reason", ""),
         classification_text,
@@ -171,28 +183,31 @@ def _save_review(
         str(lead.get("notes", "") or "").strip(),
         reason,
     ]
-    update_lead(
-        db,
-        lead["id"],
-        {
-            "company_name": lead.get("company_name", ""),
-            "email": lead.get("email", ""),
-            "industry": lead.get("industry", ""),
-            "product_fit": lead.get("product_fit", "Both"),
-            "fit_reason": fit_reason,
-            "match_score": lead.get("match_score", 0),
-            "status": status,
-            "crawl_status": lead.get("crawl_status", ""),
-            "classification_status": _classification_category(classification_text),
-            "market_fit_status": _market_fit_status(market_text),
-            "email_verification_status": _email_verification_status(lead),
-            "notes": "\n".join(part for part in note_parts if part),
-            "raw_text": lead.get("raw_text", ""),
-        },
+    updates = {
+        "company_name": lead.get("company_name", ""),
+        "email": lead.get("email", ""),
+        "industry": lead.get("industry", ""),
+        "product_fit": lead.get("product_fit", "Both"),
+        "fit_reason": fit_reason,
+        "match_score": lead.get("match_score", 0),
+        "status": status,
+        "crawl_status": lead.get("crawl_status", ""),
+        "classification_status": classification["label"],
+        "classification_evidence": classification["explanation"],
+        "score_evidence": lead.get("score_evidence", ""),
+        "market_fit_status": _market_fit_status(market_text),
+        "email_verification_status": _email_verification_status(lead),
+        "notes": "\n".join(part for part in note_parts if part),
+        "raw_text": lead.get("raw_text", ""),
+    }
+    updates["review_status"] = review_status_for_lead(
+        {**lead, **updates},
+        min_score=min_score,
     )
+    update_lead(db, lead["id"], updates)
 
 
-def _mark_error(db, lead: dict, message: str) -> None:
+def _mark_error(db, lead: dict, message: str, classification: dict) -> None:
     notes = str(lead.get("notes", "") or "").strip()
     update_lead(
         db,
@@ -200,6 +215,10 @@ def _mark_error(db, lead: dict, message: str) -> None:
         {
             "status": "Error",
             "crawl_status": "error",
+            "classification_status": classification["label"],
+            "classification_evidence": classification["explanation"],
+            "score_evidence": lead.get("score_evidence", ""),
+            "review_status": "crawl_failed",
             "notes": "\n".join(part for part in [notes, f"Batch review error: {message}"] if part),
         },
     )
@@ -223,7 +242,6 @@ def _review_existing_evidence(
     }
     scored = {**fallback_lead, **score_lead(fallback_lead)}
     classification = classify_company_site(scored)
-    classification_text = classification_note(classification)
 
     if classification["category"] in {"supplier", "noise"}:
         _save_review(
@@ -231,7 +249,8 @@ def _review_existing_evidence(
             scored,
             status="Rejected",
             reason=f"Batch review fallback: {crawl_message}",
-            classification_text=classification_text,
+            classification=classification,
+            min_score=options.min_score,
         )
         return "rejected"
 
@@ -243,12 +262,13 @@ def _review_existing_evidence(
             scored,
             status=status,
             reason=f"Batch review fallback: {crawl_message}",
-            classification_text=classification_text,
+            classification=classification,
+            min_score=options.min_score,
             market_text=market_fit_note(market_fit),
         )
         return "qualified" if status == "Qualified" else "rejected"
 
-    _mark_error(db, lead, crawl_message)
+    _mark_error(db, scored, crawl_message, classification)
     return "errors"
 
 
@@ -259,14 +279,6 @@ def _replace_review_notes(existing: str, *notes: str) -> str:
 
 def _append_note(existing: str, note: str) -> str:
     return "\n".join(part for part in [str(existing or "").strip(), note.strip()] if part)
-
-
-def _classification_category(note: str) -> str:
-    prefix = "Site classification: "
-    text = str(note or "")
-    if not text.startswith(prefix):
-        return ""
-    return text[len(prefix):].split(" ", 1)[0]
 
 
 def _market_fit_status(note: str) -> str:

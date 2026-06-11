@@ -271,7 +271,7 @@ class LeadFinderTests(unittest.TestCase):
         self.assertTrue(classification["passed"])
         self.assertEqual(classification["category"], "downstream_customer")
 
-    def test_classifier_returns_normalized_buyer_label_and_explanation(self) -> None:
+    def test_classifier_returns_normalized_manufacturer_label_and_explanation(self) -> None:
         classification = classify_company_site(
             {
                 "raw_text": "Pultrusion manufacturer making FRP profiles. Contact us for capabilities.",
@@ -281,9 +281,33 @@ class LeadFinderTests(unittest.TestCase):
 
         self.assertTrue(classification["passed"])
         self.assertEqual(classification["category"], "downstream_customer")
-        self.assertEqual(classification["label"], "buyer")
+        self.assertEqual(classification["label"], "manufacturer")
         self.assertIn("downstream usage evidence", classification["explanation"])
         self.assertIn("pultrusion manufacturer", classification["evidence"])
+
+    def test_classifier_returns_buyer_label_without_manufacturer_evidence(self) -> None:
+        classification = classify_company_site(
+            {
+                "raw_text": "Custom pultrusions and FRP profiles. Contact us for capabilities.",
+                "website": "https://buyer.example",
+            }
+        )
+
+        self.assertTrue(classification["passed"])
+        self.assertEqual(classification["category"], "downstream_customer")
+        self.assertEqual(classification["label"], "buyer")
+
+    def test_classifier_preserves_distributor_label(self) -> None:
+        classification = classify_company_site(
+            {
+                "raw_text": "Stocking distributor of fiberglass supplies. Request a quote.",
+                "website": "https://distributor.example",
+            }
+        )
+
+        self.assertTrue(classification["passed"])
+        self.assertEqual(classification["category"], "distributor_or_importer")
+        self.assertEqual(classification["label"], "distributor")
 
     def test_classifier_returns_supplier_label_and_explanation(self) -> None:
         classification = classify_company_site(

@@ -93,6 +93,18 @@ def enrichment_eligible(lead: dict, *, min_score: int = 50) -> bool:
     return True
 
 
+def review_status_for_lead(lead: dict, *, min_score: int = 50) -> str:
+    crawl_status = str(lead.get("crawl_status", "") or "").strip().lower()
+    if crawl_status and crawl_status not in PASSING_CRAWL_STATUSES:
+        return "crawl_failed"
+    classification = lead_classification_label(lead.get("classification_status", ""))
+    if classification == "supplier":
+        return "suspected_supplier"
+    if enrichment_eligible(lead, min_score=min_score):
+        return "high_confidence"
+    return "needs_review"
+
+
 def _list_value(value: object) -> list:
     return list(value) if isinstance(value, list) else []
 
