@@ -789,7 +789,7 @@ class LocalLeadApp:
             limit = max(1, min(int(limit_text), 500))
             db = connect(self.db_path)
             try:
-                leads = list_leads(db, status=status, limit=500 if review else limit)
+                leads = list_leads(db, status=status, limit=None if review else limit)
             finally:
                 db.close()
             leads = [_decorate_lead_for_display(lead) for lead in leads]

@@ -199,6 +199,36 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual([lead["company_name"] for lead in payload["leads"]], ["Later Match"])
 
+    def test_api_review_filter_finds_match_beyond_first_500_rows(self) -> None:
+        db = connect(self.db_path)
+        try:
+            db.executemany(
+                """
+                INSERT INTO leads (company_name, status, match_score, review_status)
+                VALUES (?, 'Qualified', 90, 'high_confidence')
+                """,
+                [(f"High Confidence {index:03d}",) for index in range(500)],
+            )
+            db.execute(
+                """
+                INSERT INTO leads (company_name, status, match_score, review_status)
+                VALUES ('Match Beyond 500', 'Discovered', 40, 'needs_review')
+                """
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        status, _, body = make_app(self.db_path).handle(
+            "GET",
+            "/api/leads?review=needs_review&limit=1",
+            b"",
+        )
+        payload = json.loads(body.decode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual([lead["company_name"] for lead in payload["leads"]], ["Match Beyond 500"])
+
     def test_api_campaign_runs_without_serper(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app = make_app(Path(tmp) / "leadfinder.sqlite")
