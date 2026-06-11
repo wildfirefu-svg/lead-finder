@@ -22,6 +22,7 @@ from .serper import SerperClient
 
 
 ALLOWED_STATUSES = {"Discovered", "Enriched", "Qualified", "Rejected", "Error"}
+SUPPORTED_REVIEWS = {"high_confidence", "needs_review", "suspected_supplier", "crawl_failed"}
 
 INDEX_HTML = """<!doctype html>
 <html lang="zh-CN">
@@ -787,14 +788,29 @@ class LocalLeadApp:
             review = query.get("review", [None])[0]
             limit_text = query.get("limit", ["100"])[0]
             limit = max(1, min(int(limit_text), 500))
+            if review and review not in SUPPORTED_REVIEWS:
+                return self.json_response({"error": "invalid review"}, status=400)
             db = connect(self.db_path)
             try:
-                leads = list_leads(db, status=status, limit=None if review else limit)
+                if review:
+                    leads = []
+                    offset = 0
+                    while len(leads) < limit:
+                        chunk = list_leads(db, status=status, limit=500, offset=offset)
+                        decorated = [_decorate_lead_for_display(lead) for lead in chunk]
+                        for lead in decorated:
+                            if lead["review_status"] == review:
+                                leads.append(lead)
+                                if len(leads) >= limit:
+                                    break
+                        if len(leads) >= limit or len(chunk) < 500:
+                            break
+                        offset += 500
+                else:
+                    leads = list_leads(db, status=status, limit=limit)
+                    leads = [_decorate_lead_for_display(lead) for lead in leads]
             finally:
                 db.close()
-            leads = [_decorate_lead_for_display(lead) for lead in leads]
-            if review:
-                leads = [lead for lead in leads if lead["review_status"] == review][:limit]
             return self.json_response({"leads": leads})
 
         if method == "GET" and parsed.path == "/api/stats":

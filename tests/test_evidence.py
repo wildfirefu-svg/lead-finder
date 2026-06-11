@@ -57,6 +57,21 @@ class EvidenceTests(unittest.TestCase):
             ],
         )
 
+    def test_score_reason_text_ignores_malformed_items(self) -> None:
+        text = score_reason_text(
+            {
+                "additions": [
+                    "legacy",
+                    {"points": "many", "reason": "legacy", "terms": "abc"},
+                    {"points": "2.5", "terms": [" fiberglass ", None, ""]},
+                    {"points": float("inf"), "reason": ""},
+                ],
+                "penalties": [None],
+            }
+        )
+
+        self.assertEqual(text, "0 legacy; +2.5: fiberglass")
+
     def test_lead_classification_label_maps_existing_categories(self) -> None:
         self.assertEqual(lead_classification_label("downstream_customer"), "buyer")
         self.assertEqual(lead_classification_label("distributor_or_importer"), "distributor")

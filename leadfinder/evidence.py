@@ -42,9 +42,13 @@ def parse_score_evidence(value: str | dict | None) -> dict:
 def score_reason_text(evidence: dict) -> str:
     parts: list[str] = []
     for item in evidence.get("additions", []):
-        parts.append(_format_item(item, positive=True))
+        formatted = _format_item(item, positive=True)
+        if formatted:
+            parts.append(formatted)
     for item in evidence.get("penalties", []):
-        parts.append(_format_item(item, positive=False))
+        formatted = _format_item(item, positive=False)
+        if formatted:
+            parts.append(formatted)
     if not parts:
         return "No fiberglass keywords found yet; review manually."
     return "; ".join(parts)
@@ -93,13 +97,42 @@ def _list_value(value: object) -> list:
     return list(value) if isinstance(value, list) else []
 
 
-def _format_item(item: dict, *, positive: bool) -> str:
-    points = int(item.get("points", 0) or 0)
+def _format_item(item: object, *, positive: bool) -> str:
+    if not isinstance(item, dict):
+        return ""
+    points = _coerce_points(item.get("points", 0))
     if positive and points > 0:
         prefix = f"+{points}"
     else:
         prefix = str(points)
     reason = str(item.get("reason", "") or "").strip()
-    terms = [str(term) for term in item.get("terms", []) if str(term).strip()]
+    raw_terms = item.get("terms", [])
+    terms = (
+        [
+            str(term).strip()
+            for term in raw_terms
+            if term is not None and str(term).strip()
+        ]
+        if isinstance(raw_terms, (list, tuple, set))
+        else []
+    )
+    if not reason and not points and not terms:
+        return ""
     suffix = f": {', '.join(terms[:5])}" if terms else ""
-    return f"{prefix} {reason}{suffix}".strip()
+    return f"{prefix} {reason}{suffix}".strip() if reason else f"{prefix}{suffix}"
+
+
+def _coerce_points(value: object) -> int | float:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (float, str)):
+        try:
+            number = float(value)
+        except ValueError:
+            return 0
+        if not math.isfinite(number):
+            return 0
+        return int(number) if number.is_integer() else number
+    return 0

@@ -364,7 +364,12 @@ def update_lead(db: sqlite3.Connection, lead_id: int, updates: dict) -> dict:
     return dict(row)
 
 
-def list_leads(db: sqlite3.Connection, status: str | None = None, limit: int | None = None) -> list[dict]:
+def list_leads(
+    db: sqlite3.Connection,
+    status: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict]:
     sql = "SELECT * FROM leads"
     params: list[object] = []
     if status:
@@ -383,8 +388,8 @@ def list_leads(db: sqlite3.Connection, status: str | None = None, limit: int | N
         match_score DESC, updated_at DESC, id DESC
     """
     if limit is not None:
-        sql += " LIMIT ?"
-        params.append(limit)
+        sql += " LIMIT ? OFFSET ?"
+        params.extend((limit, offset))
     return [dict(row) for row in db.execute(sql, params).fetchall()]
 
 

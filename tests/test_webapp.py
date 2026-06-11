@@ -136,6 +136,16 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual([lead["company_name"] for lead in payload["leads"]], ["High Confidence"])
 
+    def test_api_leads_rejects_unsupported_review_without_opening_database(self) -> None:
+        app = make_app(self.db_path)
+
+        with patch("leadfinder.webapp.connect") as mocked_connect:
+            status, _, body = app.handle("GET", "/api/leads?review=unknown", b"")
+
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body.decode("utf-8")), {"error": "invalid review"})
+        mocked_connect.assert_not_called()
+
     def test_api_leads_decorates_score_evidence(self) -> None:
         db = connect(self.db_path)
         try:
@@ -164,6 +174,33 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("+20 buyer language: fiberglass", lead["score_explanation"])
         self.assertIn("-10 supplier language: manufacturer", lead["score_explanation"])
+
+    def test_api_leads_returns_string_explanation_for_malformed_score_evidence(self) -> None:
+        db = connect(self.db_path)
+        try:
+            create_or_skip_lead(
+                db,
+                {
+                    "company_name": "Legacy Buyer",
+                    "score_evidence": json.dumps(
+                        {
+                            "additions": [
+                                "legacy",
+                                {"points": "many", "reason": "legacy", "terms": "abc"},
+                            ],
+                            "penalties": [None],
+                        }
+                    ),
+                },
+            )
+        finally:
+            db.close()
+
+        status, _, body = make_app(self.db_path).handle("GET", "/api/leads", b"")
+        lead = json.loads(body.decode("utf-8"))["leads"][0]
+
+        self.assertEqual(status, 200)
+        self.assertIsInstance(lead["score_explanation"], str)
 
     def test_api_review_filter_applies_limit_after_filtering(self) -> None:
         db = connect(self.db_path)
@@ -228,6 +265,32 @@ class WebAppTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual([lead["company_name"] for lead in payload["leads"]], ["Match Beyond 500"])
+
+    def test_api_review_filter_scans_in_bounded_chunks(self) -> None:
+        first_chunk = [
+            {"company_name": f"Nonmatch {index:03d}", "review_status": "high_confidence"}
+            for index in range(500)
+        ]
+        second_chunk = [{"company_name": "Later Match", "review_status": "needs_review"}]
+        app = make_app(self.db_path)
+
+        with patch("leadfinder.webapp.list_leads", side_effect=[first_chunk, second_chunk]) as mocked_list:
+            status, _, body = app.handle(
+                "GET",
+                "/api/leads?review=needs_review&limit=1",
+                b"",
+            )
+
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(status, 200)
+        self.assertEqual([lead["company_name"] for lead in payload["leads"]], ["Later Match"])
+        self.assertEqual(
+            mocked_list.call_args_list,
+            [
+                unittest.mock.call(unittest.mock.ANY, status=None, limit=500, offset=0),
+                unittest.mock.call(unittest.mock.ANY, status=None, limit=500, offset=500),
+            ],
+        )
 
     def test_api_campaign_runs_without_serper(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
