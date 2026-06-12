@@ -104,6 +104,8 @@ class WebAppTests(unittest.TestCase):
         html = body.decode("utf-8")
 
         self.assertEqual(status, 200)
+        self.assertIn("grid-template-columns: minmax(280px, 1fr) minmax(0, 3fr);", html)
+        self.assertIn("header { grid-template-columns: minmax(0, 1fr); padding: 18px; }", html)
         self.assertIn("高置信 Qualified", html)
         self.assertIn("待人工复核", html)
         self.assertIn("疑似供应商误判", html)

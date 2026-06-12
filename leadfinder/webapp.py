@@ -53,7 +53,7 @@ INDEX_HTML = """<!doctype html>
     }
     header {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: minmax(280px, 1fr) minmax(0, 3fr);
       gap: 16px;
       align-items: end;
       padding: 22px 28px;
@@ -270,7 +270,7 @@ INDEX_HTML = """<!doctype html>
       color: var(--muted);
     }
     @media (max-width: 760px) {
-      header { grid-template-columns: 1fr; padding: 18px; }
+      header { grid-template-columns: minmax(0, 1fr); padding: 18px; }
       .toolbar { justify-content: flex-start; }
       main { padding: 14px; }
       .metrics { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
