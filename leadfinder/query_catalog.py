@@ -194,9 +194,12 @@ def product_families_for_hs(hs_code: str, selected_product: str = "all") -> list
     product_key = str(selected_product or "all").strip().lower().replace("-", "_")
     normalized_product = LEGACY_PRODUCT_ALIASES.get(product_key, product_key)
     normalized_hs = "".join(char for char in str(hs_code or "") if char.isdigit())
+    hs_families = list(HS_PRODUCT_FAMILIES.get(normalized_hs, HS_PRODUCT_FAMILIES["7019"]))
+    if normalized_product == "yarn" and "yarn" not in hs_families and "roving" in hs_families:
+        return ["roving"]
     if normalized_product and normalized_product != "all":
         return [normalized_product]
-    return list(HS_PRODUCT_FAMILIES.get(normalized_hs, HS_PRODUCT_FAMILIES["7019"]))
+    return hs_families
 
 
 def build_query_specs(country: str, hs_code: str, selected_product: str = "all") -> list[dict]:

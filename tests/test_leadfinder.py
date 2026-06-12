@@ -742,7 +742,7 @@ class LeadFinderTests(unittest.TestCase):
         self.assertTrue(any("pultrusion" in query for query in queries))
 
     def test_build_queries_prefers_canada_localized_terms(self) -> None:
-        queries = build_queries("Canada", "roving")
+        queries = build_queries("Canada", "yarn")
 
         self.assertIn('site:.ca "FRP grating" "contact"', queries[0])
         self.assertTrue(any("fiberglass rebar" in query for query in queries))
@@ -754,14 +754,14 @@ class LeadFinderTests(unittest.TestCase):
         self.assertTrue(all("-site:okorder.com" in query for query in queries))
 
     def test_build_queries_uses_local_language_for_germany(self) -> None:
-        queries = build_queries("Germany", "roving")
+        queries = build_queries("Germany", "yarn")
 
         self.assertTrue(any("glasfaser" in query.lower() for query in queries))
         self.assertTrue(any("GFK" in query for query in queries))
         self.assertTrue(all("-site:datainsightsreports.com" in query for query in queries))
 
     def test_build_queries_uses_local_language_for_morocco(self) -> None:
-        queries = build_queries("Morocco", "roving")
+        queries = build_queries("Morocco", "yarn")
 
         self.assertIn('site:.ma "fibre de verre" "composite"', queries[0])
         self.assertTrue(any("Maroc" in query for query in queries))
@@ -780,6 +780,20 @@ class LeadFinderTests(unittest.TestCase):
         self.assertTrue(queries)
         self.assertTrue(any("glass fiber yarn" in query.lower() for query in queries))
         self.assertFalse(any("Ontario" in query for query in queries))
+
+    def test_build_queries_keeps_legacy_yarn_behavior_for_roving_hs(self) -> None:
+        queries = build_queries("Germany", "yarn", hs_code="701912")
+
+        self.assertTrue(queries)
+        self.assertTrue(any("pultrusion" in query.lower() for query in queries))
+        self.assertTrue(any("glasfaser" in query.lower() for query in queries))
+
+    def test_build_queries_keeps_legacy_yarn_behavior_without_hs_override(self) -> None:
+        queries = build_queries("Germany", "yarn")
+
+        self.assertTrue(queries)
+        self.assertTrue(any("pultrusion" in query.lower() for query in queries))
+        self.assertTrue(any("glasfaser" in query.lower() for query in queries))
 
     def test_mocked_discovery_rows_can_be_inserted_and_listed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -51,7 +51,11 @@ EXCLUDED_DISCOVERY_EXTENSIONS = {".pdf", ".doc", ".docx", ".ppt", ".pptx"}
 
 
 def build_queries(country: str, product: str = "all", hs_code: str = "7019") -> list[str]:
-    return [spec["query"] for spec in build_query_specs(country, hs_code, product)]
+    product_key = str(product or "all").strip().lower().replace("-", "_")
+    selected_product = product
+    if hs_code == "7019" and product_key == "yarn":
+        selected_product = "roving"
+    return [spec["query"] for spec in build_query_specs(country, hs_code, selected_product)]
 
 
 def is_excluded_discovery_domain(domain: str) -> bool:
