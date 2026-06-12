@@ -238,6 +238,15 @@ def downstream_site_enricher(url: str, defaults: dict | None = None, **_: object
     return lead
 
 
+def germany_site_enricher(url: str, defaults: dict | None = None, **_: object) -> dict:
+    lead = {**(defaults or {}), "website": url}
+    lead["raw_text"] = (
+        f"{lead.get('raw_text', '')} About us: GFK pultrusion profiles, composite capabilities, "
+        "contact us, request a quote. Bavaria Germany."
+    )
+    return lead
+
+
 def partial_downstream_site_enricher(url: str, defaults: dict | None = None, **_: object) -> dict:
     return {
         **downstream_site_enricher(url, defaults),
@@ -680,13 +689,13 @@ class CampaignRunnerTests(unittest.TestCase):
                     db,
                     CampaignOptions(
                         hs_code="701912",
-                        product="both",
-                        target_countries=("USA",),
+                        product="all",
+                        target_countries=("Germany",),
                         per_market_limit=1,
                         use_serper=True,
                     ),
                     serper_client=FakeSerperClient(),
-                    site_enricher=downstream_site_enricher,
+                    site_enricher=germany_site_enricher,
                 )
                 leads = list_leads(db, campaign_run_id=result["run_id"])
                 other_run_leads = list_leads(db, campaign_run_id=result["run_id"] + 1)
@@ -696,9 +705,9 @@ class CampaignRunnerTests(unittest.TestCase):
         self.assertEqual(len(leads), 1)
         self.assertEqual(other_run_leads, [])
         self.assertEqual(leads[0]["campaign_run_id"], result["run_id"])
-        self.assertEqual(leads[0]["query_locale"], "en-US")
+        self.assertEqual(leads[0]["query_locale"], "de-DE")
         self.assertEqual(leads[0]["product_family"], "roving")
-        self.assertIn("pultrusion", leads[0]["discovery_query"])
+        self.assertIn("glasfaser", leads[0]["discovery_query"].lower())
 
     def test_campaign_records_structured_serper_event_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -708,8 +717,8 @@ class CampaignRunnerTests(unittest.TestCase):
                     db,
                     CampaignOptions(
                         hs_code="701912",
-                        product="both",
-                        target_countries=("USA",),
+                        product="all",
+                        target_countries=("Germany",),
                         per_market_limit=1,
                         use_serper=True,
                     ),
@@ -721,10 +730,10 @@ class CampaignRunnerTests(unittest.TestCase):
 
         serper_event = next(event for event in events if event["provider"] == "Serper")
         message = json.loads(serper_event["message"])
-        self.assertEqual(message["country"], "USA")
-        self.assertEqual(message["locale"], "en-US")
+        self.assertEqual(message["country"], "Germany")
+        self.assertEqual(message["locale"], "de-DE")
         self.assertEqual(message["product_family"], "roving")
-        self.assertIn("pultrusion", message["query"])
+        self.assertIn("glasfaser", message["query"].lower())
 
     def test_campaign_keeps_query_budget_independent_per_country(self) -> None:
         client = RecordingSerperClient()
@@ -735,9 +744,9 @@ class CampaignRunnerTests(unittest.TestCase):
                     db,
                     CampaignOptions(
                         hs_code="701912",
-                        product="both",
-                        target_countries=("USA", "Canada"),
-                        per_market_limit=1,
+                        product="all",
+                        target_countries=("Germany", "France"),
+                        per_market_limit=2,
                         use_serper=True,
                     ),
                     serper_client=client,
@@ -745,9 +754,11 @@ class CampaignRunnerTests(unittest.TestCase):
             finally:
                 db.close()
 
-        self.assertEqual(len(client.queries), 2)
-        self.assertTrue(any("USA" in query for query in client.queries))
-        self.assertTrue(any("Canada" in query or "site:.ca" in query for query in client.queries))
+        germany_queries = [query for query in client.queries if "Germany" in query or "Deutschland" in query or "site:.de" in query]
+        france_queries = [query for query in client.queries if "France" in query or "site:.fr" in query]
+        self.assertEqual(len(client.queries), 4)
+        self.assertEqual(len(germany_queries), 2)
+        self.assertEqual(len(france_queries), 2)
 
     def test_campaign_skips_duplicates_before_site_crawl(self) -> None:
         enricher = CountingSiteEnricher()
