@@ -382,9 +382,9 @@ def update_lead(db: sqlite3.Connection, lead_id: int, updates: dict) -> dict:
 def list_leads(
     db: sqlite3.Connection,
     status: str | None = None,
-    campaign_run_id: int | None = None,
     limit: int | None = None,
     offset: int = 0,
+    campaign_run_id: int | None = None,
 ) -> list[dict]:
     sql = "SELECT * FROM leads"
     params: list[object] = []

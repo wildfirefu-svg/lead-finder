@@ -57,6 +57,25 @@ def _append_note(existing: str, note: str) -> str:
     return "\n".join(parts)
 
 
+def _serper_event_message(
+    *,
+    country: str,
+    locale: str,
+    product_family: str,
+    query: str,
+    error: str | None = None,
+) -> str:
+    payload = {
+        "country": country,
+        "locale": locale,
+        "product_family": product_family,
+        "query": query[:400],
+    }
+    if error is not None:
+        payload["error"] = str(error)[:240]
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 def run_campaign(
     db,
     options: CampaignOptions,
@@ -162,19 +181,16 @@ def run_campaign(
                 country = market.get("country_region", "")
                 created_for_market = 0
                 query_specs = build_query_specs(country, options.hs_code, effective_product)
-                query_limit = max(1, int(options.per_market_limit))
+                query_limit = min(len(query_specs), max(4, min(8, int(options.per_market_limit))))
                 for spec in query_specs[:query_limit]:
                     if created_for_market >= int(options.per_market_limit):
                         break
                     query = spec["query"]
-                    serper_message = json.dumps(
-                        {
-                            "country": country,
-                            "locale": spec["locale"],
-                            "product_family": spec["product_family"],
-                            "query": query,
-                        },
-                        ensure_ascii=False,
+                    serper_message = _serper_event_message(
+                        country=country,
+                        locale=spec["locale"],
+                        product_family=spec["product_family"],
+                        query=query,
                     )
                     try:
                         payload = serper_client.search(query, num=max(1, min(options.per_market_limit, 100)))
@@ -196,15 +212,12 @@ def run_campaign(
                             event_type="search",
                             status="error",
                             cost_units=0,
-                            message=json.dumps(
-                                {
-                                    "country": country,
-                                    "locale": spec["locale"],
-                                    "product_family": spec["product_family"],
-                                    "query": query,
-                                    "error": str(error),
-                                },
-                                ensure_ascii=False,
+                            message=_serper_event_message(
+                                country=country,
+                                locale=spec["locale"],
+                                product_family=spec["product_family"],
+                                query=query,
+                                error=str(error),
                             ),
                         )
                         continue

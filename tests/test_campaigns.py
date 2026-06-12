@@ -10,6 +10,7 @@ from leadfinder.config import settings
 from leadfinder.db import (
     connect,
     create_campaign_run,
+    create_or_skip_lead,
     finish_campaign_run,
     list_campaign_runs,
     list_leads,
@@ -119,6 +120,27 @@ class CampaignDbTests(unittest.TestCase):
         self.assertEqual(events[0]["provider"], "Serper")
         self.assertEqual(events[0]["cost_units"], 1)
 
+    def test_list_leads_preserves_legacy_positional_limit_and_offset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                for index in range(3):
+                    create_or_skip_lead(
+                        db,
+                        {
+                            "company_name": f"Buyer {index}",
+                            "website": f"https://buyer{index}.example",
+                            "status": "Qualified",
+                            "match_score": 80 - index,
+                        },
+                    )
+                rows = list_leads(db, "Qualified", 1, 1)
+            finally:
+                db.close()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["company_name"], "Buyer 1")
+
 
 class FakeSerperClient:
     def search(self, query: str, num: int = 10) -> dict:
@@ -188,6 +210,11 @@ class UniqueLeadSerperClient:
                 }
             ]
         }
+
+
+class FailingSerperClient:
+    def search(self, query: str, num: int = 10) -> dict:
+        raise RuntimeError("x" * 2000)
 
 
 class FakeApolloClient:
@@ -735,6 +762,38 @@ class CampaignRunnerTests(unittest.TestCase):
         self.assertEqual(message["product_family"], "roving")
         self.assertIn("glasfaser", message["query"].lower())
 
+    def test_campaign_records_compact_structured_serper_error_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                result = run_campaign(
+                    db,
+                    CampaignOptions(
+                        hs_code="701912",
+                        product="all",
+                        target_countries=("Germany",),
+                        per_market_limit=1,
+                        use_serper=True,
+                    ),
+                    serper_client=FailingSerperClient(),
+                )
+                events = list_provider_events(db, result["run_id"])
+            finally:
+                db.close()
+
+        serper_event = next(
+            event
+            for event in events
+            if event["provider"] == "Serper" and event["status"] == "error"
+        )
+        message = json.loads(serper_event["message"])
+        self.assertEqual(message["country"], "Germany")
+        self.assertEqual(message["locale"], "de-DE")
+        self.assertEqual(message["product_family"], "roving")
+        self.assertIn("glasfaser", message["query"].lower())
+        self.assertTrue(message["error"])
+        self.assertLess(len(serper_event["message"]), 1000)
+
     def test_campaign_keeps_query_budget_independent_per_country(self) -> None:
         client = RecordingSerperClient()
         with tempfile.TemporaryDirectory() as tmp:
@@ -756,17 +815,15 @@ class CampaignRunnerTests(unittest.TestCase):
 
         germany_queries = [query for query in client.queries if "Germany" in query or "Deutschland" in query or "site:.de" in query]
         france_queries = [query for query in client.queries if "France" in query or "site:.fr" in query]
-        self.assertEqual(len(client.queries), 4)
-        self.assertEqual(len(germany_queries), 2)
-        self.assertEqual(len(france_queries), 2)
+        self.assertEqual(len(client.queries), 8)
+        self.assertEqual(len(germany_queries), 4)
+        self.assertEqual(len(france_queries), 4)
 
     def test_campaign_skips_duplicates_before_site_crawl(self) -> None:
         enricher = CountingSiteEnricher()
         with tempfile.TemporaryDirectory() as tmp:
             db = connect(Path(tmp) / "leadfinder.sqlite")
             try:
-                from leadfinder.db import create_or_skip_lead
-
                 create_or_skip_lead(
                     db,
                     {
@@ -839,7 +896,7 @@ class CampaignRunnerTests(unittest.TestCase):
             finally:
                 db.close()
 
-        self.assertEqual(len(client.queries), 1)
+        self.assertEqual(len(client.queries), 3)
         self.assertTrue(all("Morocco" in query or "Maroc" in query or "site:.ma" in query for query in client.queries))
 
 
