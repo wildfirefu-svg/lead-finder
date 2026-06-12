@@ -5,21 +5,9 @@ import urllib.parse
 import urllib.request
 
 from .enrich import normalize_domain, normalize_url
+from .query_catalog import QUERY_EXCLUSIONS, build_query_specs
 
 SERPER_URL = "https://google.serper.dev/search"
-
-QUERY_EXCLUSIONS = (
-    "-site:zauba.com -site:thomasnet.com -site:exporthub.com "
-    "-site:seair.co.in -site:volza.com -site:tradeindia.com "
-    "-site:alibaba.com -site:made-in-china.com -site:globalsources.com "
-    "-site:facebook.com -site:linkedin.com -site:openpr.com "
-    "-site:instagram.com -site:pinterest.com -site:youtube.com "
-    "-site:prnewswire.com -site:globenewswire.com -site:indexbox.io "
-    "-site:justdial.com -site:jec-world.events -site:researchandmarkets.com "
-    "-site:tradekey.com -site:kenresearch.com -site:marketreportanalytics.com "
-    "-site:marketresearchfuture.com -site:marketresearch.com -site:datainsightsreports.com -filetype:pdf"
-    " -site:compositesworld.com -site:scribd.com -site:marketresearch.biz -site:nasa.gov -site:okorder.com"
-)
 
 EXCLUDED_DISCOVERY_DOMAINS = {
     "zauba.com",
@@ -60,178 +48,10 @@ EXCLUDED_DISCOVERY_DOMAINS = {
 
 EXCLUDED_DISCOVERY_EXTENSIONS = {".pdf", ".doc", ".docx", ".ppt", ".pptx"}
 
-YARN_QUERIES = [
-    '"fiberglass roving" "pultrusion" "capabilities" {country}',
-    '"fiberglass roving" "filament winding" "capabilities" {country}',
-    '"fiberglass roving" "FRP" "contact us" {country}',
-    '"fiberglass roving" "custom pultrusions" {country}',
-]
-
-FABRIC_QUERIES = [
-    '"fiberglass fabric" importer {country}',
-    '"woven roving" buyer {country}',
-    '"fiberglass cloth" distributor {country}',
-    '"insulation" manufacturer {country} fiberglass fabric',
-]
-
-LOCAL_YARN_QUERIES = {
-    "canada": [
-        'site:.ca "FRP grating" "contact"',
-        'site:.ca "fiberglass rebar"',
-        'site:.ca "pultrusion" "FRP"',
-        '"fiberglass reinforced plastic" Canada "contact us"',
-        '"fiberglass rebar" Canada "contact us"',
-        '"fiberglass roving" "Ontario" "composites"',
-    ],
-    "usa": [
-        '"fiberglass roving" "United States" "pultrusion"',
-        '"fiberglass roving" "FRP" "Wisconsin"',
-        '"fiberglass roving" "FRP" "Texas"',
-    ],
-    "united states": [
-        '"fiberglass roving" "United States" "pultrusion"',
-        '"fiberglass roving" "FRP" "Wisconsin"',
-        '"fiberglass roving" "FRP" "Texas"',
-    ],
-    "mexico": [
-        'site:.mx "fibra de vidrio" "pultrusion"',
-        '"fibra de vidrio" "FRP" Mexico',
-        '"fiberglass roving" Mexico composites',
-    ],
-    "germany": [
-        'site:.de "glasfaser roving" "pultrusion"',
-        'site:.de "GFK" "profile"',
-        '"GFK" "Roving" Deutschland',
-        '"glasfaser" "FRP" Germany',
-    ],
-    "france": [
-        'site:.fr "fibre de verre" "pultrusion"',
-        'site:.fr "composite" "profilé"',
-        '"fibre de verre" "composites" France',
-        '"roving fibre de verre" France',
-    ],
-    "united kingdom": [
-        'site:.uk "fibreglass roving" "pultrusion"',
-        '"fibreglass" "FRP" UK',
-        '"fiberglass roving" "United Kingdom" composites',
-    ],
-    "italy": [
-        'site:.it "fibra di vetro" "pultrusione"',
-        '"fibra di vetro" "compositi" Italy',
-        '"fiberglass roving" Italy composites',
-    ],
-    "spain": [
-        'site:.es "fibra de vidrio" "pultrusion"',
-        '"fibra de vidrio" "composites" Spain',
-        '"fiberglass roving" Spain composites',
-    ],
-    "netherlands": [
-        'site:.nl "glasvezel" "pultrusie"',
-        '"fiberglass roving" Netherlands composites',
-    ],
-    "poland": [
-        'site:.pl "włókno szklane" "kompozyty"',
-        '"fiberglass roving" Poland composites',
-    ],
-    "vietnam": [
-        '"fiberglass roving" Vietnam "FRP"',
-        '"composite" "fiberglass" Vietnam manufacturer',
-    ],
-    "thailand": [
-        '"fiberglass roving" Thailand "FRP"',
-        '"composite" "fiberglass" Thailand manufacturer',
-    ],
-    "indonesia": [
-        '"fiberglass roving" Indonesia "FRP"',
-        '"composite" "fiberglass" Indonesia manufacturer',
-    ],
-    "malaysia": [
-        '"fiberglass roving" Malaysia "FRP"',
-        '"composite" "fiberglass" Malaysia manufacturer',
-    ],
-    "philippines": [
-        '"fiberglass roving" Philippines "FRP"',
-        '"composite" "fiberglass" Philippines manufacturer',
-    ],
-    "singapore": [
-        '"fiberglass roving" Singapore "FRP"',
-        '"composite" "fiberglass" Singapore distributor',
-    ],
-    "india": [
-        'site:.in "fiberglass roving" "pultrusion"',
-        'site:.in "FRP grating" "contact"',
-        '"fiberglass rebar" India',
-        '"fiberglass roving" India "FRP"',
-        '"composite" "fiberglass" India manufacturer',
-    ],
-    "united arab emirates": [
-        '"fiberglass roving" UAE "FRP"',
-        '"composite" "fiberglass" Dubai',
-    ],
-    "saudi arabia": [
-        '"fiberglass roving" Saudi Arabia "FRP"',
-        '"composite" "fiberglass" Saudi',
-    ],
-    "turkey": [
-        'site:.tr "cam elyaf" "kompozit"',
-        '"fiberglass roving" Turkey "FRP"',
-    ],
-    "japan": [
-        'site:.jp "ガラス繊維" "FRP"',
-        '"fiberglass roving" Japan composites',
-    ],
-    "south korea": [
-        'site:.kr "glass fiber" "FRP"',
-        '"fiberglass roving" Korea composites',
-    ],
-    "brazil": [
-        'site:.br "fibra de vidro" "pultrusão"',
-        '"fiberglass roving" Brazil "FRP"',
-    ],
-    "morocco": [
-        'site:.ma "fibre de verre" "composite"',
-        'site:.ma "PRV" "fibre de verre"',
-        '"fibre de verre" "Maroc" "composite"',
-        '"polyester" "fibre de verre" Maroc',
-    ],
-    "south africa": [
-        '"fiberglass roving" "South Africa" "FRP"',
-        '"composite" "fiberglass" "South Africa"',
-    ],
-}
-
-LOCAL_FABRIC_QUERIES = {
-    "canada": [
-        'site:.ca "fiberglass fabric" composites',
-        '"fiberglass cloth" Canada distributor',
-    ],
-    "germany": [
-        'site:.de "glasfasergewebe" "GFK"',
-        '"fiberglass fabric" Germany composites',
-    ],
-    "france": [
-        'site:.fr "tissu fibre de verre"',
-        '"fiberglass fabric" France composites',
-    ],
-    "india": [
-        'site:.in "fiberglass fabric" composites',
-        '"woven roving" India buyer',
-    ],
-}
 
 
-def build_queries(country: str, product: str = "both") -> list[str]:
-    product_key = product.lower().replace("_", "-")
-    country_key = country.lower().strip()
-    templates: list[str] = []
-    if product_key in {"yarn", "fiberglass-yarn", "both"}:
-        templates.extend(LOCAL_YARN_QUERIES.get(country_key, []))
-        templates.extend(YARN_QUERIES)
-    if product_key in {"fabric", "fiberglass-fabric", "both"}:
-        templates.extend(LOCAL_FABRIC_QUERIES.get(country_key, []))
-        templates.extend(FABRIC_QUERIES)
-    queries = [f"{template.format(country=country)} {QUERY_EXCLUSIONS}" for template in templates]
-    return list(dict.fromkeys(queries))
+def build_queries(country: str, product: str = "all", hs_code: str = "7019") -> list[str]:
+    return [spec["query"] for spec in build_query_specs(country, hs_code, product)]
 
 
 def is_excluded_discovery_domain(domain: str) -> bool:

@@ -767,6 +767,13 @@ class LeadFinderTests(unittest.TestCase):
         self.assertTrue(any("Maroc" in query for query in queries))
         self.assertTrue(all("-site:okorder.com" in query for query in queries))
 
+    def test_build_queries_keeps_legacy_string_interface(self) -> None:
+        queries = build_queries("Germany", "roving", hs_code="701912")
+
+        self.assertTrue(queries)
+        self.assertTrue(all(isinstance(query, str) for query in queries))
+        self.assertTrue(any("glasfaser" in query.lower() for query in queries))
+
     def test_mocked_discovery_rows_can_be_inserted_and_listed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = connect(Path(tmp) / "leadfinder.sqlite")
