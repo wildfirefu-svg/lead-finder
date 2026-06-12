@@ -26,6 +26,7 @@ class QueryCatalogTests(unittest.TestCase):
     def test_product_families_for_specific_hs_prefers_matching_family(self) -> None:
         self.assertEqual(product_families_for_hs("701912", "all"), ["roving"])
         self.assertEqual(product_families_for_hs("701971", "all"), ["tissue"])
+        self.assertEqual(product_families_for_hs("701913", "yarn"), ["yarn"])
 
     def test_build_query_specs_for_germany_include_locale_family_and_terms(self) -> None:
         specs = build_query_specs("Germany", "701912", "all")
@@ -45,6 +46,14 @@ class QueryCatalogTests(unittest.TestCase):
         self.assertIn("woven_fabric", families)
         self.assertIn("mat", families)
         self.assertTrue(any("Ontario" in spec["query"] for spec in specs))
+
+    def test_build_query_specs_for_explicit_yarn_stays_on_yarn_family(self) -> None:
+        specs = build_query_specs("Canada", "701913", "yarn")
+
+        self.assertTrue(specs)
+        self.assertTrue(all(spec["product_family"] == "yarn" for spec in specs))
+        self.assertTrue(any("glass fiber yarn" in spec["query"].lower() for spec in specs))
+        self.assertFalse(any("Ontario" in spec["query"] for spec in specs))
 
 
 if __name__ == "__main__":

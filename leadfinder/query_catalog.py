@@ -174,7 +174,7 @@ LEGACY_PRODUCT_ALIASES = {
     "fiberglass_yarn": "roving",
     "fiberglass-yarn": "roving",
     "roving": "roving",
-    "yarn": "roving",
+    "yarn": "yarn",
     "fiberglass_fabric": "woven_fabric",
     "fiberglass-fabric": "woven_fabric",
     "fabric": "woven_fabric",

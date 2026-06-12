@@ -742,7 +742,7 @@ class LeadFinderTests(unittest.TestCase):
         self.assertTrue(any("pultrusion" in query for query in queries))
 
     def test_build_queries_prefers_canada_localized_terms(self) -> None:
-        queries = build_queries("Canada", "yarn")
+        queries = build_queries("Canada", "roving")
 
         self.assertIn('site:.ca "FRP grating" "contact"', queries[0])
         self.assertTrue(any("fiberglass rebar" in query for query in queries))
@@ -754,14 +754,14 @@ class LeadFinderTests(unittest.TestCase):
         self.assertTrue(all("-site:okorder.com" in query for query in queries))
 
     def test_build_queries_uses_local_language_for_germany(self) -> None:
-        queries = build_queries("Germany", "yarn")
+        queries = build_queries("Germany", "roving")
 
         self.assertTrue(any("glasfaser" in query.lower() for query in queries))
         self.assertTrue(any("GFK" in query for query in queries))
         self.assertTrue(all("-site:datainsightsreports.com" in query for query in queries))
 
     def test_build_queries_uses_local_language_for_morocco(self) -> None:
-        queries = build_queries("Morocco", "yarn")
+        queries = build_queries("Morocco", "roving")
 
         self.assertIn('site:.ma "fibre de verre" "composite"', queries[0])
         self.assertTrue(any("Maroc" in query for query in queries))
@@ -773,6 +773,13 @@ class LeadFinderTests(unittest.TestCase):
         self.assertTrue(queries)
         self.assertTrue(all(isinstance(query, str) for query in queries))
         self.assertTrue(any("glasfaser" in query.lower() for query in queries))
+
+    def test_build_queries_supports_explicit_yarn_family(self) -> None:
+        queries = build_queries("Canada", "yarn", hs_code="701913")
+
+        self.assertTrue(queries)
+        self.assertTrue(any("glass fiber yarn" in query.lower() for query in queries))
+        self.assertFalse(any("Ontario" in query for query in queries))
 
     def test_mocked_discovery_rows_can_be_inserted_and_listed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
