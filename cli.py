@@ -7,9 +7,11 @@ import sys
 from leadfinder.apollo import ApolloClient
 from leadfinder.campaigns import CampaignOptions, run_campaign
 from leadfinder.config import settings
+from leadfinder.crm import pull_crm_feedback, sync_verified_qualified
 from leadfinder.db import connect, create_or_skip_lead, list_leads, list_markets, stats, update_lead, upsert_market
 from leadfinder.enrich import enrich_site
 from leadfinder.exporter import export_csv
+from leadfinder.feedback import crm_feedback_report
 from leadfinder.hunter import HunterClient
 from leadfinder.importers import import_csv
 from leadfinder.markets import fallback_markets, fetch_comtrade_markets
@@ -165,6 +167,49 @@ def cmd_recall_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sync_crm(args: argparse.Namespace) -> int:
+    cfg = settings()
+    db = connect(cfg.db_path)
+    try:
+        result = sync_verified_qualified(
+            db,
+            cfg.crm_url,
+            limit=args.limit,
+            timeout=cfg.timeout_seconds,
+        )
+    finally:
+        db.close()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_pull_crm_feedback(args: argparse.Namespace) -> int:
+    cfg = settings()
+    db = connect(cfg.db_path)
+    try:
+        result = pull_crm_feedback(
+            db,
+            cfg.crm_url,
+            limit=args.limit,
+            timeout=cfg.timeout_seconds,
+        )
+    finally:
+        db.close()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_crm_feedback_report(_: argparse.Namespace) -> int:
+    cfg = settings()
+    db = connect(cfg.db_path)
+    try:
+        report = crm_feedback_report(db)
+    finally:
+        db.close()
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     cfg = settings()
     serve(cfg.db_path, host=args.host, port=args.port)
@@ -263,6 +308,17 @@ def build_parser() -> argparse.ArgumentParser:
     recall_parser = sub.add_parser("recall-report", help="Show campaign-run recall productivity grouped by market and product family.")
     recall_parser.add_argument("--run-id", type=int, default=None)
     recall_parser.set_defaults(func=cmd_recall_report)
+
+    sync_crm_parser = sub.add_parser("sync-crm", help="Sync verified Qualified leads into the local CRM.")
+    sync_crm_parser.add_argument("--limit", type=int, default=50)
+    sync_crm_parser.set_defaults(func=cmd_sync_crm)
+
+    pull_feedback_parser = sub.add_parser("pull-crm-feedback", help="Pull CRM follow-up outcomes back into local leads.")
+    pull_feedback_parser.add_argument("--limit", type=int, default=None)
+    pull_feedback_parser.set_defaults(func=cmd_pull_crm_feedback)
+
+    feedback_report_parser = sub.add_parser("crm-feedback-report", help="Summarize CRM outcomes by country, query, and classification rule.")
+    feedback_report_parser.set_defaults(func=cmd_crm_feedback_report)
 
     serve_parser = sub.add_parser("serve", help="Run the private local lead workbench.")
     serve_parser.add_argument("--host", default="127.0.0.1")

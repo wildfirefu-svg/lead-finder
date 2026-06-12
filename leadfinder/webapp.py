@@ -11,10 +11,11 @@ from .apollo import ApolloClient
 from .campaigns import CampaignOptions, run_campaign
 from .config import settings
 from .contact_enrichment import enrich_qualified_emails, verify_existing_qualified_emails
-from .crm import crm_status, sync_verified_qualified
+from .crm import crm_status, pull_crm_feedback, sync_verified_qualified
 from .db import connect, latest_provider_usage, list_leads, stats, update_lead
 from .evidence import parse_score_evidence, review_status_for_lead, score_reason_text
 from .exporter import export_csv_bytes
+from .feedback import crm_feedback_report
 from .hunter import HunterClient
 from .query_catalog import PRODUCT_FAMILY_LABELS
 from .recall import recall_report
@@ -319,6 +320,7 @@ INDEX_HTML = """<!doctype html>
       <button id="verify-qualified" type="button">验证已有邮箱</button>
       <button id="export-qualified" type="button">导出 Qualified</button>
       <button id="sync-crm" type="button">同步到 CRM</button>
+      <button id="pull-crm-feedback" type="button">拉取 CRM 反馈</button>
     </div>
   </header>
   <main>
@@ -403,6 +405,29 @@ __PRODUCT_FAMILY_OPTIONS__
         </table>
       </div>
     </section>
+    <section class="campaign" aria-label="CRM反馈总结">
+      <h2 style="margin:0 0 10px;font-size:16px;">CRM反馈总结</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>国家</th>
+              <th>产品族</th>
+              <th>分类规则</th>
+              <th>搜索词</th>
+              <th>有效客户</th>
+              <th>非买家</th>
+              <th>错市场</th>
+              <th>重复</th>
+              <th>无回复</th>
+              <th>勿联系</th>
+              <th>建议</th>
+            </tr>
+          </thead>
+          <tbody id="crm-feedback-report"><tr><td class="empty" colspan="11">暂无 CRM 反馈。</td></tr></tbody>
+        </table>
+      </div>
+    </section>
     <div class="table-wrap">
       <table>
         <thead>
@@ -418,11 +443,12 @@ __PRODUCT_FAMILY_OPTIONS__
             <th>市场</th>
             <th>邮箱验证</th>
             <th>CRM</th>
+            <th>CRM反馈</th>
             <th>来源</th>
             <th>原因</th>
           </tr>
         </thead>
-        <tbody id="leads"><tr><td class="empty" colspan="13">正在加载线索...</td></tr></tbody>
+        <tbody id="leads"><tr><td class="empty" colspan="14">正在加载线索...</td></tr></tbody>
       </table>
     </div>
   </main>
@@ -520,7 +546,12 @@ __PRODUCT_FAMILY_OPTIONS__
         supplier: '供应商', noise: '噪声', unknown: '待判断',
         passed: '通过', failed: '不通过',
         valid: '有效', invalid: '无效', accept_all: '全收域名',
-        not_found: '未找到', synced: '已同步', duplicate: '已存在'
+        not_found: '未找到', synced: '已同步', duplicate: '已存在',
+        valid_customer: '有效客户', not_buyer: '非买家', wrong_market: '错市场',
+        no_response: '无回复', do_not_contact: '勿联系',
+        prioritize_follow_up: '优先跟进', needs_manual_confirmation: '待人工确认',
+        Replied: '已回复', Sent: '已发送', Drafted: '已生成草稿',
+        New: '新线索', Unsubscribed: '已退订'
       };
       return labels[value] || value || '—';
     }
@@ -611,7 +642,7 @@ __PRODUCT_FAMILY_OPTIONS__
       document.getElementById('next-page').disabled = currentResultLength !== state.limit;
       const tbody = document.getElementById('leads');
       if (!leads.length) {
-        tbody.innerHTML = '<tr><td class="empty" colspan="13">当前视图没有线索。</td></tr>';
+        tbody.innerHTML = '<tr><td class="empty" colspan="14">当前视图没有线索。</td></tr>';
         await loadStats();
         return;
       }
@@ -622,7 +653,9 @@ __PRODUCT_FAMILY_OPTIONS__
           lead.review_status ? `复核: ${lead.review_status}` : '',
           lead.classification_status ? `分类: ${lead.classification_status}` : '',
           lead.classification_evidence ? `分类依据: ${lead.classification_evidence}` : '',
-          lead.score_explanation ? `评分依据: ${lead.score_explanation}` : ''
+          lead.score_explanation ? `评分依据: ${lead.score_explanation}` : '',
+          lead.crm_followup_status ? `CRM跟进: ${lead.crm_followup_status}` : '',
+          lead.crm_last_contact_at ? `CRM最近联系: ${lead.crm_last_contact_at}` : ''
         ].filter(Boolean).join(' | ');
         return `
           <tr>
@@ -637,6 +670,7 @@ __PRODUCT_FAMILY_OPTIONS__
             <td class="state">${esc(stateLabel(lead.market_fit_status))}</td>
             <td class="state">${esc(stateLabel(lead.email_verification_status))}</td>
             <td class="state">${esc(stateLabel(lead.crm_sync_status))}</td>
+            <td class="state">${esc(stateLabel(lead.crm_outcome))}</td>
             <td class="source" title="${esc(lead.source_name)}">${esc(sourceLabel(lead.source_name))}</td>
             <td class="reason">${esc(lead.fit_reason)}${evidence ? `<div>${esc(evidence)}</div>` : ''}</td>
           </tr>
@@ -699,12 +733,39 @@ __PRODUCT_FAMILY_OPTIONS__
       `).join('');
     }
 
+    async function loadCrmFeedbackReport() {
+      const response = await fetch('/api/crm-feedback-report');
+      const payload = await response.json();
+      const rows = payload.rows || [];
+      const tbody = document.getElementById('crm-feedback-report');
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td class="empty" colspan="11">暂无 CRM 反馈。</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((row) => `
+        <tr>
+          <td>${esc(row.country)}</td>
+          <td>${esc(productFamilyLabel(row.product_family))}</td>
+          <td>${esc(stateLabel(row.classification_status))}</td>
+          <td class="reason">${esc(row.discovery_query || '')}</td>
+          <td>${row.valid_customer || 0}</td>
+          <td>${row.not_buyer || 0}</td>
+          <td>${row.wrong_market || 0}</td>
+          <td>${row.duplicate || 0}</td>
+          <td>${row.no_response || 0}</td>
+          <td>${row.do_not_contact || 0}</td>
+          <td>${esc(stateLabel(row.suggestion))}</td>
+        </tr>
+      `).join('');
+    }
+
     async function loadCrmState() {
       const response = await fetch('/api/crm-state');
       const payload = await response.json();
       const available = Boolean(payload.available);
       document.getElementById('crm-state').textContent = available ? 'CRM 已连接' : 'CRM 未连接';
       document.getElementById('sync-crm').disabled = !available;
+      document.getElementById('pull-crm-feedback').disabled = !available;
     }
 
     async function runCampaign() {
@@ -812,6 +873,26 @@ __PRODUCT_FAMILY_OPTIONS__
       }
     }
 
+    async function pullCrmFeedback() {
+      const summary = document.getElementById('campaign-summary');
+      const button = document.getElementById('pull-crm-feedback');
+      button.disabled = true;
+      summary.textContent = '正在从 CRM 拉取跟进反馈...';
+      try {
+        const response = await fetch('/api/pull-crm-feedback', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({limit: 500})
+        });
+        const payload = await response.json();
+        summary.textContent = JSON.stringify(payload.result || payload, null, 2);
+        await loadLeads();
+        await loadCrmFeedbackReport();
+      } finally {
+        await loadCrmState();
+      }
+    }
+
     document.getElementById('refresh').addEventListener('click', loadLeads);
     document.getElementById('status-filter').addEventListener('change', () => {
       state.offset = 0;
@@ -839,10 +920,12 @@ __PRODUCT_FAMILY_OPTIONS__
       window.location.href = '/api/export-qualified';
     });
     document.getElementById('sync-crm').addEventListener('click', syncCrm);
+    document.getElementById('pull-crm-feedback').addEventListener('click', pullCrmFeedback);
     renderMarketPicker();
     loadProviderState();
     loadUsage();
     loadRecallReport();
+    loadCrmFeedbackReport();
     loadCrmState();
     loadLeads();
   </script>
@@ -974,6 +1057,14 @@ class LocalLeadApp:
                 payload = {"available": False, "error": sanitize_error(error)}
             return self.json_response(payload)
 
+        if method == "GET" and parsed.path == "/api/crm-feedback-report":
+            db = connect(self.db_path)
+            try:
+                payload = crm_feedback_report(db)
+            finally:
+                db.close()
+            return self.json_response(payload)
+
         if method == "POST" and parsed.path == "/api/campaign":
             cfg = settings()
             payload = json.loads(body.decode("utf-8") or "{}")
@@ -1078,6 +1169,30 @@ class LocalLeadApp:
             db = connect(self.db_path)
             try:
                 result = sync_verified_qualified(
+                    db,
+                    cfg.crm_url,
+                    limit=limit,
+                    timeout=min(cfg.timeout_seconds, 8.0),
+                )
+            finally:
+                db.close()
+            return self.json_response({"result": result})
+
+        if method == "POST" and parsed.path == "/api/pull-crm-feedback":
+            cfg = settings()
+            payload = json.loads(body.decode("utf-8") or "{}")
+            raw_limit = payload.get("limit")
+            limit = None if raw_limit in (None, "", 0) else max(1, min(int(raw_limit), 1000))
+            try:
+                crm_status(cfg.crm_url, timeout=min(cfg.timeout_seconds, 3.0))
+            except Exception as error:
+                return self.json_response(
+                    {"error": sanitize_error(error)},
+                    status=503,
+                )
+            db = connect(self.db_path)
+            try:
+                result = pull_crm_feedback(
                     db,
                     cfg.crm_url,
                     limit=limit,

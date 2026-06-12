@@ -131,6 +131,10 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("function loadRecallReport", html)
         self.assertIn("await loadRecallReport(payload.result ? payload.result.run_id : '')", html)
         self.assertIn("loadRecallReport();", html)
+        self.assertIn("拉取 CRM 反馈", html)
+        self.assertIn("CRM反馈总结", html)
+        self.assertIn('id="crm-feedback-report"', html)
+        self.assertIn("function loadCrmFeedbackReport", html)
 
     def test_api_leads_supports_review_filter(self) -> None:
         db = connect(self.db_path)
@@ -624,6 +628,54 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(payload["available"])
         self.assertNotIn("secret", payload["error"])
+
+    def test_api_crm_feedback_report_returns_rows(self) -> None:
+        db = connect(self.db_path)
+        try:
+            create_or_skip_lead(
+                db,
+                {
+                    "company_name": "CRM Buyer",
+                    "website": "https://crm.example",
+                    "country_region": "Germany",
+                    "product_family": "roving",
+                    "classification_status": "buyer",
+                    "discovery_query": "demo query",
+                    "crm_outcome": "valid_customer",
+                },
+            )
+        finally:
+            db.close()
+
+        status, headers, body = make_app(self.db_path).handle("GET", "/api/crm-feedback-report", b"")
+        payload = json.loads(body.decode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
+        self.assertEqual(payload["rows"][0]["country"], "Germany")
+        self.assertEqual(payload["rows"][0]["valid_customer"], 1)
+
+    def test_api_pull_crm_feedback_returns_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(Path(tmp) / "leadfinder.sqlite")
+            expected = {
+                "matched": 2,
+                "updated": 2,
+                "unmatched": 0,
+                "errors": 0,
+                "outcomes": {"valid_customer": 1},
+            }
+            with patch("leadfinder.webapp.crm_status", return_value={"available": True}):
+                with patch("leadfinder.webapp.pull_crm_feedback", return_value=expected):
+                    status, headers, body = app.handle(
+                        "POST",
+                        "/api/pull-crm-feedback",
+                        json.dumps({"limit": 50}).encode("utf-8"),
+                    )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
+        self.assertEqual(json.loads(body.decode("utf-8"))["result"], expected)
 
     def test_api_requalify_returns_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
