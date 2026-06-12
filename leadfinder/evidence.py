@@ -5,7 +5,7 @@ import math
 
 PASSING_CLASSIFICATIONS = {"buyer", "manufacturer", "distributor"}
 PASSING_MARKET_STATUSES = {"passed", "pass", "matched", "ok", "positive"}
-PASSING_CRAWL_STATUSES = {"", "ok", "success", "passed", "fetched"}
+PASSING_CRAWL_STATUSES = {"", "ok", "success", "passed", "fetched", "partial"}
 
 
 def evidence_json(evidence: dict) -> str:

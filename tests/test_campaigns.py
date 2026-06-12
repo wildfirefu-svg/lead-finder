@@ -238,6 +238,13 @@ def downstream_site_enricher(url: str, defaults: dict | None = None, **_: object
     return lead
 
 
+def partial_downstream_site_enricher(url: str, defaults: dict | None = None, **_: object) -> dict:
+    return {
+        **downstream_site_enricher(url, defaults),
+        "crawl_status": "partial",
+    }
+
+
 def supplier_site_enricher(url: str, defaults: dict | None = None, **_: object) -> dict:
     lead = {**(defaults or {}), "website": url}
     lead["raw_text"] = (
@@ -452,6 +459,38 @@ class CampaignRunnerTests(unittest.TestCase):
         self.assertTrue(rows[0]["classification_evidence"])
         self.assertIsInstance(json.loads(rows[0]["score_evidence"]), dict)
         self.assertEqual(rows[0]["review_status"], "high_confidence")
+
+    def test_campaign_accepts_partial_crawl_and_runs_paid_enrichment(self) -> None:
+        hunter = TrackingHunterClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                result = run_campaign(
+                    db,
+                    CampaignOptions(
+                        hs_code="701912",
+                        product="yarn",
+                        target_countries=("USA",),
+                        min_score=50,
+                        use_serper=True,
+                        use_hunter=True,
+                    ),
+                    serper_client=FakeSerperClient(),
+                    hunter_client=hunter,
+                    site_enricher=partial_downstream_site_enricher,
+                )
+                rows = list_leads(db)
+            finally:
+                db.close()
+
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "Qualified")
+        self.assertEqual(rows[0]["classification_status"], "buyer")
+        self.assertEqual(rows[0]["crawl_status"], "partial")
+        self.assertEqual(rows[0]["review_status"], "high_confidence")
+        self.assertEqual(rows[0]["email"], "sales@buyer.example")
+        self.assertEqual(hunter.calls, ["buyer.example"])
 
     def test_campaign_skips_supplier_sites_before_contact_enrichment(self) -> None:
         hunter = TrackingHunterClient()

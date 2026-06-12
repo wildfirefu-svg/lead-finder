@@ -126,6 +126,19 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(enrichment_eligible(lead, min_score=50))
         self.assertTrue(enrichment_eligible({**lead, "market_fit_status": "passed"}, min_score=50))
 
+    def test_partial_crawl_is_eligible_and_high_confidence(self) -> None:
+        lead = {
+            "status": "Qualified",
+            "match_score": 75,
+            "website": "https://buyer.example",
+            "classification_status": "buyer",
+            "market_fit_status": "passed",
+            "crawl_status": "partial",
+        }
+
+        self.assertTrue(enrichment_eligible(lead, min_score=50))
+        self.assertEqual(review_status_for_lead(lead, min_score=50), "high_confidence")
+
     def test_review_status_prioritizes_crawl_failure_before_supplier(self) -> None:
         lead = {
             "status": "Rejected",

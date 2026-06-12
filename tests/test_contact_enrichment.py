@@ -82,6 +82,31 @@ class ContactEnrichmentTests(unittest.TestCase):
         self.assertEqual(lead["email"], "")
         self.assertIn("Hunter verification: invalid", lead["notes"])
 
+    def test_enriches_qualified_lead_with_partial_crawl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Partial Crawl Buyer",
+                        "website": "https://partial.example",
+                        "status": "Qualified",
+                        "match_score": 75,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "partial",
+                    },
+                )
+                result = enrich_qualified_emails(db, FakeHunter(), limit=5)
+                lead = list_leads(db)[0]
+            finally:
+                db.close()
+
+        self.assertEqual(result["attempted"], 1)
+        self.assertEqual(result["verified"], 1)
+        self.assertEqual(lead["email"], "sales@partial.example")
+
     def test_skips_domains_already_searched_by_hunter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = connect(Path(tmp) / "leadfinder.sqlite")
