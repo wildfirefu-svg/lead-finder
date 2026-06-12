@@ -7,11 +7,11 @@ import sqlite3
 def recall_report(db: sqlite3.Connection, run_id: int | None = None) -> dict:
     run = _load_run(db, run_id)
     if not run:
-        return {"run": None, "groups": []}
+        return {"run": None, "rows": []}
 
     serper_groups = _serper_groups(db, run["id"])
     lead_groups = _lead_groups(db, run["id"])
-    groups: list[dict] = []
+    rows: list[dict] = []
 
     for key in sorted(set(serper_groups) | set(lead_groups)):
         country, locale, product_family = key
@@ -27,7 +27,7 @@ def recall_report(db: sqlite3.Connection, run_id: int | None = None) -> dict:
         )
         serper_queries = int(serper["serper_queries"])
         qualified_count = int(leads["qualified_count"])
-        groups.append(
+        rows.append(
             {
                 "country": country,
                 "locale": locale,
@@ -42,7 +42,7 @@ def recall_report(db: sqlite3.Connection, run_id: int | None = None) -> dict:
             }
         )
 
-    return {"run": dict(run), "groups": groups}
+    return {"run": dict(run), "rows": rows}
 
 
 def _load_run(db: sqlite3.Connection, run_id: int | None) -> sqlite3.Row | None:
@@ -136,4 +136,4 @@ def _has_valid_email(row: sqlite3.Row) -> bool:
     verification_status = str(row["email_verification_status"] or "").strip().lower()
     if not email:
         return False
-    return verification_status in {"", "valid"}
+    return verification_status == "valid"

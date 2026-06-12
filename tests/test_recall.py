@@ -151,7 +151,7 @@ class RecallReportTests(unittest.TestCase):
         self.assertEqual(report["run"]["id"], latest_run["id"])
         groups = {
             (group["country"], group["locale"], group["product_family"]): group
-            for group in report["groups"]
+            for group in report["rows"]
         }
 
         usa_group = groups[("USA", "en-US", "roving")]
@@ -174,7 +174,7 @@ class RecallReportTests(unittest.TestCase):
         self.assertEqual(france_group["serper_queries"], 0)
         self.assertEqual(france_group["leads_created"], 1)
         self.assertEqual(france_group["qualified_count"], 1)
-        self.assertEqual(france_group["valid_email_count"], 1)
+        self.assertEqual(france_group["valid_email_count"], 0)
         self.assertEqual(france_group["qualified_per_query"], 0)
 
         self.assertNotIn(("Canada", "en-CA", "roving"), groups)
@@ -235,7 +235,7 @@ class RecallReportTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["run"]["id"], requested_run["id"])
         self.assertEqual(
-            payload["groups"],
+            payload["rows"],
             [
                 {
                     "country": "Mexico",
