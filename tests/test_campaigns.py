@@ -672,6 +672,83 @@ class CampaignRunnerTests(unittest.TestCase):
         self.assertTrue(any("pultrusion" in query for query in client.queries))
         self.assertFalse(any("fiberglass fabric" in query for query in client.queries))
 
+    def test_campaign_persists_recall_metadata_on_leads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                result = run_campaign(
+                    db,
+                    CampaignOptions(
+                        hs_code="701912",
+                        product="both",
+                        target_countries=("USA",),
+                        per_market_limit=1,
+                        use_serper=True,
+                    ),
+                    serper_client=FakeSerperClient(),
+                    site_enricher=downstream_site_enricher,
+                )
+                leads = list_leads(db, campaign_run_id=result["run_id"])
+                other_run_leads = list_leads(db, campaign_run_id=result["run_id"] + 1)
+            finally:
+                db.close()
+
+        self.assertEqual(len(leads), 1)
+        self.assertEqual(other_run_leads, [])
+        self.assertEqual(leads[0]["campaign_run_id"], result["run_id"])
+        self.assertEqual(leads[0]["query_locale"], "en-US")
+        self.assertEqual(leads[0]["product_family"], "roving")
+        self.assertIn("pultrusion", leads[0]["discovery_query"])
+
+    def test_campaign_records_structured_serper_event_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                result = run_campaign(
+                    db,
+                    CampaignOptions(
+                        hs_code="701912",
+                        product="both",
+                        target_countries=("USA",),
+                        per_market_limit=1,
+                        use_serper=True,
+                    ),
+                    serper_client=RecordingSerperClient(),
+                )
+                events = list_provider_events(db, result["run_id"])
+            finally:
+                db.close()
+
+        serper_event = next(event for event in events if event["provider"] == "Serper")
+        message = json.loads(serper_event["message"])
+        self.assertEqual(message["country"], "USA")
+        self.assertEqual(message["locale"], "en-US")
+        self.assertEqual(message["product_family"], "roving")
+        self.assertIn("pultrusion", message["query"])
+
+    def test_campaign_keeps_query_budget_independent_per_country(self) -> None:
+        client = RecordingSerperClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                run_campaign(
+                    db,
+                    CampaignOptions(
+                        hs_code="701912",
+                        product="both",
+                        target_countries=("USA", "Canada"),
+                        per_market_limit=1,
+                        use_serper=True,
+                    ),
+                    serper_client=client,
+                )
+            finally:
+                db.close()
+
+        self.assertEqual(len(client.queries), 2)
+        self.assertTrue(any("USA" in query for query in client.queries))
+        self.assertTrue(any("Canada" in query or "site:.ca" in query for query in client.queries))
+
     def test_campaign_skips_duplicates_before_site_crawl(self) -> None:
         enricher = CountingSiteEnricher()
         with tempfile.TemporaryDirectory() as tmp:
@@ -751,7 +828,7 @@ class CampaignRunnerTests(unittest.TestCase):
             finally:
                 db.close()
 
-        self.assertEqual(len(client.queries), 4)
+        self.assertEqual(len(client.queries), 1)
         self.assertTrue(all("Morocco" in query or "Maroc" in query or "site:.ma" in query for query in client.queries))
 
 

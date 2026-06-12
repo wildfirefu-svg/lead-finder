@@ -46,6 +46,10 @@ CREATE TABLE IF NOT EXISTS leads (
   crm_sync_status TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
   raw_text TEXT NOT NULL DEFAULT '',
+  campaign_run_id INTEGER NOT NULL DEFAULT 0,
+  discovery_query TEXT NOT NULL DEFAULT '',
+  query_locale TEXT NOT NULL DEFAULT '',
+  product_family TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -118,6 +122,10 @@ LEAD_FIELDS = [
     "crm_sync_status",
     "notes",
     "raw_text",
+    "campaign_run_id",
+    "discovery_query",
+    "query_locale",
+    "product_family",
 ]
 
 LEAD_STATUS_COLUMNS = {
@@ -129,6 +137,10 @@ LEAD_STATUS_COLUMNS = {
     "market_fit_status": "TEXT NOT NULL DEFAULT ''",
     "email_verification_status": "TEXT NOT NULL DEFAULT ''",
     "crm_sync_status": "TEXT NOT NULL DEFAULT ''",
+    "campaign_run_id": "INTEGER NOT NULL DEFAULT 0",
+    "discovery_query": "TEXT NOT NULL DEFAULT ''",
+    "query_locale": "TEXT NOT NULL DEFAULT ''",
+    "product_family": "TEXT NOT NULL DEFAULT ''",
 }
 
 
@@ -325,6 +337,7 @@ def create_or_skip_lead(db: sqlite3.Connection, lead: dict) -> tuple[dict, bool]
     normalized["website_domain"] = normalize_domain(normalized["website"])
     normalized["email"] = str(normalized["email"] or "").strip().lower()
     normalized["match_score"] = int(normalized["match_score"] or 0)
+    normalized["campaign_run_id"] = int(normalized["campaign_run_id"] or 0)
 
     duplicate = find_duplicate(db, normalized)
     if duplicate:
@@ -351,6 +364,8 @@ def update_lead(db: sqlite3.Connection, lead_id: int, updates: dict) -> dict:
         next_updates["email"] = str(next_updates["email"] or "").strip().lower()
     if "match_score" in next_updates:
         next_updates["match_score"] = int(next_updates["match_score"] or 0)
+    if "campaign_run_id" in next_updates:
+        next_updates["campaign_run_id"] = int(next_updates["campaign_run_id"] or 0)
     if not next_updates:
         row = db.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
         return dict(row)
@@ -367,14 +382,21 @@ def update_lead(db: sqlite3.Connection, lead_id: int, updates: dict) -> dict:
 def list_leads(
     db: sqlite3.Connection,
     status: str | None = None,
+    campaign_run_id: int | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> list[dict]:
     sql = "SELECT * FROM leads"
     params: list[object] = []
+    filters: list[str] = []
     if status:
-        sql += " WHERE status = ?"
+        filters.append("status = ?")
         params.append(status)
+    if campaign_run_id is not None:
+        filters.append("campaign_run_id = ?")
+        params.append(int(campaign_run_id))
+    if filters:
+        sql += " WHERE " + " AND ".join(filters)
     sql += """
       ORDER BY
         CASE status
