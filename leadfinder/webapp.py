@@ -16,6 +16,8 @@ from .db import connect, latest_provider_usage, list_leads, stats, update_lead
 from .evidence import parse_score_evidence, review_status_for_lead, score_reason_text
 from .exporter import export_csv_bytes
 from .hunter import HunterClient
+from .query_catalog import PRODUCT_FAMILY_LABELS
+from .recall import recall_report
 from .requalify import RequalifyOptions, requalify_leads
 from .security import sanitize_error
 from .serper import SerperClient
@@ -23,6 +25,11 @@ from .serper import SerperClient
 
 ALLOWED_STATUSES = {"Discovered", "Enriched", "Qualified", "Rejected", "Error"}
 SUPPORTED_REVIEWS = {"high_confidence", "needs_review", "suspected_supplier", "crawl_failed"}
+WEB_PRODUCT_FAMILY_LABELS = {**PRODUCT_FAMILY_LABELS, "all": "全部产品族"}
+PRODUCT_FAMILY_OPTIONS_HTML = "\n".join(
+    f'            <option value="{value}">{label}</option>'
+    for value, label in WEB_PRODUCT_FAMILY_LABELS.items()
+)
 
 INDEX_HTML = """<!doctype html>
 <html lang="zh-CN">
@@ -343,9 +350,7 @@ INDEX_HTML = """<!doctype html>
         <label>年份 <input id="campaign-year" type="number" value="2024"></label>
         <label>产品类型
           <select id="campaign-product">
-            <option value="both">全部</option>
-            <option value="yarn">纱线/粗纱</option>
-            <option value="fabric">织物/布</option>
+__PRODUCT_FAMILY_OPTIONS__
           </select>
         </label>
         <label>每国家线索数 <input id="campaign-per-market" type="number" value="10" min="1" max="100"></label>
@@ -376,6 +381,28 @@ INDEX_HTML = """<!doctype html>
       <span>Apollo <b id="usage-apollo">0</b></span>
       <span id="crm-state">CRM 未连接</span>
     </section>
+    <section class="campaign" aria-label="召回质量报告">
+      <h2 style="margin:0 0 10px;font-size:16px;">召回质量报告</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>国家</th>
+              <th>语言/地区</th>
+              <th>产品族</th>
+              <th>搜索词</th>
+              <th>Serper</th>
+              <th>创建</th>
+              <th>Qualified</th>
+              <th>Rejected</th>
+              <th>有效邮箱</th>
+              <th>Qualified/Query</th>
+            </tr>
+          </thead>
+          <tbody id="recall-report"><tr><td class="empty" colspan="10">暂无召回报表。</td></tr></tbody>
+        </table>
+      </div>
+    </section>
     <div class="table-wrap">
       <table>
         <thead>
@@ -401,6 +428,7 @@ INDEX_HTML = """<!doctype html>
   </main>
   <script>
     const statuses = ['Discovered', 'Enriched', 'Qualified', 'Rejected', 'Error'];
+    const productFamilyLabels = __PRODUCT_FAMILY_LABELS__;
     const statusLabels = {
       Discovered: '已发现',
       Enriched: '已补全',
@@ -495,6 +523,10 @@ INDEX_HTML = """<!doctype html>
         not_found: '未找到', synced: '已同步', duplicate: '已存在'
       };
       return labels[value] || value || '—';
+    }
+
+    function productFamilyLabel(value) {
+      return productFamilyLabels[value] || value || '—';
     }
 
     function renderMarketPicker() {
@@ -639,6 +671,34 @@ INDEX_HTML = """<!doctype html>
       document.getElementById('usage-apollo').textContent = usage['Apollo.io'] || 0;
     }
 
+    async function loadRecallReport(runId = '') {
+      const params = new URLSearchParams();
+      if (runId) params.set('run_id', String(runId));
+      const url = params.size ? `/api/recall-report?${params.toString()}` : '/api/recall-report';
+      const response = await fetch(url);
+      const payload = await response.json();
+      const rows = payload.rows || [];
+      const tbody = document.getElementById('recall-report');
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td class="empty" colspan="10">暂无召回报表。</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((row) => `
+        <tr>
+          <td>${esc(row.country)}</td>
+          <td>${esc(row.locale)}</td>
+          <td>${esc(productFamilyLabel(row.product_family))}</td>
+          <td class="reason">${esc((row.search_terms || []).join(' | '))}</td>
+          <td>${row.serper_queries || 0}</td>
+          <td>${row.leads_created || 0}</td>
+          <td>${row.qualified_count || 0}</td>
+          <td>${row.rejected_count || 0}</td>
+          <td>${row.valid_email_count || 0}</td>
+          <td>${row.qualified_per_query || 0}</td>
+        </tr>
+      `).join('');
+    }
+
     async function loadCrmState() {
       const response = await fetch('/api/crm-state');
       const payload = await response.json();
@@ -672,6 +732,7 @@ INDEX_HTML = """<!doctype html>
       const payload = await response.json();
       summary.textContent = JSON.stringify(payload.result || payload, null, 2);
       await loadLeads();
+      await loadRecallReport(payload.result ? payload.result.run_id : '');
       await loadUsage();
     }
 
@@ -781,12 +842,17 @@ INDEX_HTML = """<!doctype html>
     renderMarketPicker();
     loadProviderState();
     loadUsage();
+    loadRecallReport();
     loadCrmState();
     loadLeads();
   </script>
 </body>
 </html>
 """
+INDEX_HTML = INDEX_HTML.replace("__PRODUCT_FAMILY_OPTIONS__", PRODUCT_FAMILY_OPTIONS_HTML).replace(
+    "__PRODUCT_FAMILY_LABELS__",
+    json.dumps(WEB_PRODUCT_FAMILY_LABELS, ensure_ascii=False),
+)
 
 
 @dataclass(frozen=True)
@@ -857,6 +923,20 @@ class LocalLeadApp:
             db = connect(self.db_path)
             try:
                 payload = latest_provider_usage(db)
+            finally:
+                db.close()
+            return self.json_response(payload)
+
+        if method == "GET" and parsed.path == "/api/recall-report":
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            run_id_text = query.get("run_id", [""])[0]
+            try:
+                run_id = int(run_id_text) if run_id_text else None
+            except (TypeError, ValueError):
+                return self.json_response({"error": "invalid run_id"}, status=400)
+            db = connect(self.db_path)
+            try:
+                payload = recall_report(db, run_id)
             finally:
                 db.close()
             return self.json_response(payload)

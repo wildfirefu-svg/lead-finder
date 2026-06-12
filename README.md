@@ -16,10 +16,11 @@ Edit `.env` and set `SERPER_API_KEY` before running live discovery.
 ```powershell
 python cli.py markets --hs 7019 --year 2024
 python cli.py discover --country USA --limit 100
-python cli.py campaign --hs 7019 --year 2024 --product both --market-limit 3 --per-market-limit 10
-python cli.py campaign --hs 7019 --year 2024 --product both --market-limit 3 --per-market-limit 10 --apollo --hunter
+python cli.py campaign --hs 701912 --year 2024 --product roving --country Germany --country France --per-market-limit 3
+python cli.py campaign --hs 701965 --year 2024 --product mesh --market-limit 3 --per-market-limit 10 --apollo --hunter
 python cli.py provider-report
 python cli.py quality-report --min-score 50
+python cli.py recall-report
 python cli.py import-csv --input exports/waitubang.csv --source 外贸邦
 python cli.py import-csv --input exports/yizhijia.csv --source 易之家
 python cli.py import-csv --input exports/apollo.csv --source Apollo.io
@@ -78,6 +79,13 @@ Use small limits first:
 ```powershell
 python cli.py campaign --market-limit 1 --per-market-limit 3
 ```
+
+## Recall workflow
+
+- Use HS codes plus product-family selection to narrow discovery before spending Serper queries.
+- Region and country selection still control target markets, but Stage B now tracks productivity per country instead of only total leads.
+- Use `python cli.py recall-report` or the workbench recall table to compare which locales and product families produce Qualified buyers and valid emails.
+- The success metric is Qualified leads per Serper query, not raw lead volume.
 
 ## Accuracy gates
 

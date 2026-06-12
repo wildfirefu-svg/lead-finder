@@ -10,6 +10,7 @@ from leadfinder.db import (
     connect,
     create_campaign_run,
     create_or_skip_lead,
+    finish_campaign_run,
     list_leads,
     record_provider_event,
 )
@@ -114,6 +115,22 @@ class WebAppTests(unittest.TestCase):
         self.assertIn('id="next-page"', html)
         self.assertIn("state.offset", html)
         self.assertIn("params.set('offset'", html)
+
+    def test_homepage_includes_stage_b_product_family_options(self) -> None:
+        app = make_app(self.db_path)
+        status, _, body = app.handle("GET", "/", b"")
+        html = body.decode("utf-8")
+
+        self.assertEqual(status, 200)
+        self.assertIn('option value="all">全部产品族</option>', html)
+        self.assertIn('option value="roving">粗纱 / Roving</option>', html)
+        self.assertIn('option value="woven_fabric">织物 / Woven Fabric</option>', html)
+        self.assertIn('option value="mat">毡 / Mat</option>', html)
+        self.assertIn("召回质量报告", html)
+        self.assertIn('id="recall-report"', html)
+        self.assertIn("function loadRecallReport", html)
+        self.assertIn("await loadRecallReport(payload.result ? payload.result.run_id : '')", html)
+        self.assertIn("loadRecallReport();", html)
 
     def test_api_leads_supports_review_filter(self) -> None:
         db = connect(self.db_path)
@@ -556,6 +573,46 @@ class WebAppTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body.decode("utf-8"))["usage"]["Serper"], 2.0)
+
+    def test_api_recall_report_returns_rows(self) -> None:
+        db = connect(self.db_path)
+        try:
+            run = create_campaign_run(db, {"name": "HS7019 recall", "hs_code": "7019"})
+            record_provider_event(
+                db,
+                run["id"],
+                provider="Serper",
+                event_type="search",
+                status="ok",
+                cost_units=1,
+                message='{"country":"Germany","locale":"de-DE","product_family":"roving","query":"demo"}',
+            )
+            create_or_skip_lead(
+                db,
+                {
+                    "company_name": "Example Buyer",
+                    "country_region": "Germany",
+                    "website": "https://buyer.example",
+                    "status": "Qualified",
+                    "campaign_run_id": run["id"],
+                    "query_locale": "de-DE",
+                    "product_family": "roving",
+                },
+            )
+            finish_campaign_run(db, run["id"], status="Completed", created=1, skipped=0, errors=0, quality_after={"total": 1})
+        finally:
+            db.close()
+
+        app = make_app(self.db_path)
+        status, headers, body = app.handle("GET", f"/api/recall-report?run_id={run['id']}", b"")
+        payload = json.loads(body.decode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
+        self.assertEqual(payload["run"]["id"], run["id"])
+        self.assertEqual(payload["rows"][0]["country"], "Germany")
+        self.assertEqual(payload["rows"][0]["product_family"], "roving")
+        self.assertEqual(payload["rows"][0]["qualified_count"], 1)
 
     def test_api_crm_state_hides_connection_error_details(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
