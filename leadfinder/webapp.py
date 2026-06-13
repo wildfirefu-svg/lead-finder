@@ -11,10 +11,11 @@ from .apollo import ApolloClient
 from .campaigns import CampaignOptions, run_campaign
 from .config import settings
 from .contact_enrichment import enrich_qualified_emails, verify_existing_qualified_emails
-from .crm import crm_status, sync_verified_qualified
+from .crm import crm_status, pull_crm_feedback, sync_verified_qualified
 from .db import connect, latest_provider_usage, list_leads, stats, update_lead
 from .evidence import parse_score_evidence, review_status_for_lead, score_reason_text
 from .exporter import export_csv_bytes
+from .feedback import crm_feedback_report
 from .hunter import HunterClient
 from .query_catalog import PRODUCT_FAMILY_LABELS
 from .recall import recall_report
@@ -60,13 +61,20 @@ INDEX_HTML = """<!doctype html>
     }
     header {
       display: grid;
-      grid-template-columns: minmax(280px, 1fr) minmax(0, 3fr);
-      gap: 16px;
-      align-items: end;
-      padding: 22px 28px;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 14px;
+      align-items: stretch;
+      padding: 22px 28px 18px;
       background: var(--rail);
       color: #f8faf2;
       border-bottom: 4px solid var(--accent-2);
+    }
+    .header-main {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
     }
     h1 {
       margin: 0;
@@ -80,11 +88,42 @@ INDEX_HTML = """<!doctype html>
       font-size: 13px;
     }
     .toolbar {
+      display: grid;
+      gap: 8px;
+      padding: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 6px;
+      background: rgba(12, 21, 31, 0.28);
+    }
+    .toolbar-row {
       display: flex;
       gap: 8px;
       align-items: center;
       flex-wrap: wrap;
-      justify-content: flex-end;
+    }
+    .toolbar-group {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex-wrap: wrap;
+      padding: 6px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.06);
+    }
+    .toolbar-group.filters {
+      flex: 1 1 100%;
+    }
+    .toolbar-group.actions {
+      flex: 1 1 auto;
+    }
+    .toolbar-group.crm {
+      flex: 0 1 auto;
+    }
+    .toolbar-label {
+      color: #c9d4dc;
+      font-size: 11px;
+      white-space: nowrap;
+      padding: 0 3px;
     }
     button, select, input {
       min-height: 34px;
@@ -102,6 +141,61 @@ INDEX_HTML = """<!doctype html>
       cursor: pointer;
     }
     button:hover { background: #eaf0ef; border-color: var(--accent); }
+    .toolbar button,
+    .toolbar select {
+      min-height: 30px;
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+    .toolbar select {
+      min-width: 110px;
+      background: #f7fafb;
+    }
+    .toolbar button {
+      white-space: nowrap;
+    }
+    .action-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      line-height: 1;
+    }
+    .action-button::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: #b7c4cc;
+      box-shadow: 0 0 0 1px rgba(90, 110, 123, 0.22);
+      flex: 0 0 auto;
+    }
+    .action-button[data-run-state="working"]::before {
+      background: #cf9a2a;
+      box-shadow: 0 0 0 3px rgba(207, 154, 42, 0.18);
+    }
+    .action-button[data-run-state="success"]::before {
+      background: #2d8f5f;
+      box-shadow: 0 0 0 3px rgba(45, 143, 95, 0.16);
+    }
+    .action-button[data-run-state="error"]::before {
+      background: #b05c2c;
+      box-shadow: 0 0 0 3px rgba(176, 92, 44, 0.16);
+    }
+    .toolbar button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #f8fbfa;
+      border-color: rgba(255, 255, 255, 0.12);
+    }
+    .toolbar button[aria-pressed="true"]:hover {
+      background: #23847d;
+      border-color: rgba(255, 255, 255, 0.16);
+    }
+    .toolbar button:disabled {
+      opacity: 0.56;
+      cursor: default;
+      background: #dce4e9;
+      border-color: #b8c4cc;
+    }
     main { padding: 18px 28px 28px; }
     .campaign {
       border: 1px solid var(--line);
@@ -125,17 +219,39 @@ INDEX_HTML = """<!doctype html>
       display: flex;
       align-items: center;
       flex-wrap: wrap;
-      gap: 12px;
+      gap: 10px;
       margin-top: 10px;
+    }
+    .provider-options {
+      display: inline-flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      min-height: 30px;
+      padding: 4px 8px;
+      border: 1px solid #dbe3e8;
+      border-radius: 6px;
+      background: #f8fafb;
     }
     .provider-row label {
       display: inline-flex;
-      grid-auto-flow: column;
       align-items: center;
       gap: 5px;
+      min-height: 30px;
+      padding: 0 1px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
     }
     .provider-row input {
       min-height: auto;
+      margin: 0;
+    }
+    .provider-row button {
+      min-height: 30px;
+      padding: 4px 8px;
+      font-size: 12px;
+      white-space: nowrap;
     }
     .market-picker {
       display: grid;
@@ -187,11 +303,70 @@ INDEX_HTML = """<!doctype html>
       font-size: 12px;
       margin-left: auto;
     }
-    #campaign-summary {
+    .summary-card {
       margin: 10px 0 0;
-      white-space: pre-wrap;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f9fbfc;
+    }
+    .summary-card--idle {
+      background: #f9fbfc;
+    }
+    .summary-card--working {
+      background: #f4f8fb;
+      border-color: #c8d8e4;
+    }
+    .summary-card--success {
+      background: #f3f8f5;
+      border-color: #c8dbcf;
+    }
+    .summary-card--warn {
+      background: #fbf7ef;
+      border-color: #e2d2b0;
+    }
+    .summary-eyebrow {
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 4px;
+    }
+    .summary-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--ink);
+      margin-bottom: 8px;
+    }
+    .summary-body {
+      display: grid;
+      gap: 4px;
       color: var(--muted);
       font-size: 12px;
+    }
+    .summary-body p {
+      margin: 0;
+    }
+    .summary-metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .summary-metric {
+      padding: 8px 9px;
+      border: 1px solid #dbe3e8;
+      border-radius: 6px;
+      background: #fff;
+    }
+    .summary-metric span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-bottom: 3px;
+    }
+    .summary-metric strong {
+      font-size: 18px;
+      line-height: 1;
+      color: var(--ink);
     }
     .metrics {
       display: grid;
@@ -278,13 +453,28 @@ INDEX_HTML = """<!doctype html>
     }
     @media (max-width: 760px) {
       header { grid-template-columns: minmax(0, 1fr); padding: 18px; }
-      .toolbar { justify-content: flex-start; }
+      .header-main { align-items: start; }
+      .toolbar { padding: 10px; }
+      .toolbar-row { flex-direction: column; align-items: stretch; }
+      .toolbar-group {
+        width: 100%;
+        align-items: stretch;
+      }
+      .toolbar-label {
+        width: 100%;
+        padding-bottom: 2px;
+      }
       main { padding: 14px; }
       .metrics { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
       .campaign-grid { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
       .campaign-grid label:first-child { grid-column: 1 / -1; }
       .market-picker { grid-template-columns: 1fr; }
       .country-list { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+      .provider-row { align-items: stretch; }
+      .provider-options {
+        width: 100%;
+        justify-content: flex-start;
+      }
     }
     @media (max-width: 430px) {
       .country-list { grid-template-columns: 1fr; }
@@ -293,32 +483,49 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
   <header>
-    <div>
+    <div class="header-main">
       <h1>玻纤外贸获客工作台</h1>
       <div class="subhead">按 HS 编码、区域市场和国家筛选，自动发现并审核海外客户线索。</div>
     </div>
     <div class="toolbar">
-      <select id="status-filter" aria-label="状态筛选">
-        <option value="">全部状态</option>
-        <option value="Discovered">已发现</option>
-        <option value="Enriched">已补全</option>
-        <option value="Qualified">已确认</option>
-        <option value="Rejected">已拒绝</option>
-        <option value="Error">错误</option>
-      </select>
-      <button type="button" data-review="">全部复核状态</button>
-      <button type="button" data-review="high_confidence">高置信 Qualified</button>
-      <button type="button" data-review="needs_review">待人工复核</button>
-      <button type="button" data-review="suspected_supplier">疑似供应商误判</button>
-      <button type="button" data-review="crawl_failed">抓取失败</button>
-      <button id="previous-page" type="button" disabled>上一页</button>
-      <button id="next-page" type="button">下一页</button>
-      <button id="refresh" type="button">刷新</button>
-      <button id="requalify" type="button">批量复核旧线索</button>
-      <button id="enrich-qualified" type="button">补全合格线索邮箱</button>
-      <button id="verify-qualified" type="button">验证已有邮箱</button>
-      <button id="export-qualified" type="button">导出 Qualified</button>
-      <button id="sync-crm" type="button">同步到 CRM</button>
+      <div class="toolbar-row">
+        <div class="toolbar-group filters">
+          <span class="toolbar-label">筛选</span>
+          <select id="status-filter" aria-label="状态筛选">
+            <option value="">全部状态</option>
+            <option value="Discovered">已发现</option>
+            <option value="Enriched">已补全</option>
+            <option value="Qualified">已确认</option>
+            <option value="Rejected">已拒绝</option>
+            <option value="Error">错误</option>
+          </select>
+          <button type="button" data-review="" aria-pressed="true">全部复核</button>
+          <button type="button" data-review="high_confidence" aria-pressed="false">高置信</button>
+          <button type="button" data-review="needs_review" aria-pressed="false">待复核</button>
+          <button type="button" data-review="suspected_supplier" aria-pressed="false">供应商误判</button>
+          <button type="button" data-review="crawl_failed" aria-pressed="false">抓取失败</button>
+        </div>
+      </div>
+      <div class="toolbar-row">
+        <div class="toolbar-group">
+          <span class="toolbar-label">浏览</span>
+          <button id="previous-page" type="button" disabled>上一页</button>
+          <button id="next-page" type="button">下一页</button>
+          <button id="refresh" type="button">刷新</button>
+        </div>
+        <div class="toolbar-group actions">
+          <span class="toolbar-label">批量处理</span>
+          <button id="requalify" class="action-button" type="button">批量复核</button>
+          <button id="enrich-qualified" class="action-button" type="button">补全邮箱</button>
+          <button id="verify-qualified" class="action-button" type="button">验证邮箱</button>
+          <button id="export-qualified" type="button">导出 Qualified</button>
+        </div>
+        <div class="toolbar-group crm">
+          <span class="toolbar-label">CRM</span>
+          <button id="sync-crm" class="action-button" type="button">同步 CRM</button>
+          <button id="pull-crm-feedback" class="action-button" type="button">拉取反馈</button>
+        </div>
+      </div>
     </div>
   </header>
   <main>
@@ -361,12 +568,14 @@ __PRODUCT_FAMILY_OPTIONS__
         <div id="country-list" class="country-list" aria-label="国家选择"></div>
       </div>
       <div class="provider-row">
-        <label><input id="campaign-serper" type="checkbox" checked> Serper</label>
-        <label><input id="campaign-apollo" type="checkbox"> Apollo</label>
-        <label><input id="campaign-hunter" type="checkbox"> Hunter</label>
-        <button id="run-campaign" type="button">开始自动搜寻</button>
+        <div class="provider-options">
+          <label><input id="campaign-serper" type="checkbox" checked> Serper</label>
+          <label><input id="campaign-apollo" type="checkbox"> Apollo</label>
+          <label><input id="campaign-hunter" type="checkbox"> Hunter</label>
+        </div>
+        <button id="run-campaign" class="action-button" type="button">开始自动搜寻</button>
       </div>
-      <pre id="campaign-summary"></pre>
+      <section id="campaign-summary" class="summary-card summary-card--idle" aria-live="polite"></section>
     </section>
     <section class="metrics" aria-label="线索指标">
       <div class="metric"><span>线索总数</span><strong id="metric-total">0</strong></div>
@@ -403,6 +612,29 @@ __PRODUCT_FAMILY_OPTIONS__
         </table>
       </div>
     </section>
+    <section class="campaign" aria-label="CRM反馈总结">
+      <h2 style="margin:0 0 10px;font-size:16px;">CRM反馈总结</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>国家</th>
+              <th>产品族</th>
+              <th>分类规则</th>
+              <th>搜索词</th>
+              <th>有效客户</th>
+              <th>非买家</th>
+              <th>错市场</th>
+              <th>重复</th>
+              <th>无回复</th>
+              <th>勿联系</th>
+              <th>建议</th>
+            </tr>
+          </thead>
+          <tbody id="crm-feedback-report"><tr><td class="empty" colspan="11">暂无 CRM 反馈。</td></tr></tbody>
+        </table>
+      </div>
+    </section>
     <div class="table-wrap">
       <table>
         <thead>
@@ -418,11 +650,12 @@ __PRODUCT_FAMILY_OPTIONS__
             <th>市场</th>
             <th>邮箱验证</th>
             <th>CRM</th>
+            <th>CRM反馈</th>
             <th>来源</th>
             <th>原因</th>
           </tr>
         </thead>
-        <tbody id="leads"><tr><td class="empty" colspan="13">正在加载线索...</td></tr></tbody>
+        <tbody id="leads"><tr><td class="empty" colspan="14">正在加载线索...</td></tr></tbody>
       </table>
     </div>
   </main>
@@ -520,9 +753,345 @@ __PRODUCT_FAMILY_OPTIONS__
         supplier: '供应商', noise: '噪声', unknown: '待判断',
         passed: '通过', failed: '不通过',
         valid: '有效', invalid: '无效', accept_all: '全收域名',
-        not_found: '未找到', synced: '已同步', duplicate: '已存在'
+        not_found: '未找到', synced: '已同步', duplicate: '已存在',
+        valid_customer: '有效客户', not_buyer: '非买家', wrong_market: '错市场',
+        no_response: '无回复', do_not_contact: '勿联系',
+        prioritize_follow_up: '优先跟进', needs_manual_confirmation: '待人工确认',
+        Replied: '已回复', Sent: '已发送', Drafted: '已生成草稿',
+        New: '新线索', Unsubscribed: '已退订'
       };
       return labels[value] || value || '—';
+    }
+
+    function syncToolbarState() {
+      document.querySelectorAll('[data-review]').forEach((button) => {
+        const review = button.getAttribute('data-review') || '';
+        button.setAttribute('aria-pressed', review === state.review ? 'true' : 'false');
+      });
+    }
+
+    const actionButtonIds = [
+      'run-campaign',
+      'requalify',
+      'enrich-qualified',
+      'verify-qualified',
+      'sync-crm',
+      'pull-crm-feedback',
+    ];
+
+    function setActionButtonState(buttonId, runState) {
+      const button = document.getElementById(buttonId);
+      if (!button) return;
+      if (!runState || runState === 'idle') {
+        button.removeAttribute('data-run-state');
+        return;
+      }
+      button.setAttribute('data-run-state', runState);
+    }
+
+    function clearActionButtonStates(activeButtonId = '') {
+      actionButtonIds.forEach((buttonId) => {
+        if (buttonId === activeButtonId) return;
+        setActionButtonState(buttonId, 'idle');
+      });
+    }
+
+    function renderActionSummary(buttonId, summary) {
+      renderSummaryCard(summary);
+      if (summary && summary.tone === 'warn') {
+        setActionButtonState(buttonId, 'error');
+        return;
+      }
+      setActionButtonState(buttonId, 'success');
+    }
+
+    function formatActionError(eyebrow, error) {
+      const detail = error && error.message ? error.message : '请稍后重试，或检查接口与网络状态。';
+      return {
+        tone: 'warn',
+        eyebrow,
+        title: '执行失败',
+        lines: ['这一步没有跑完。', detail],
+      };
+    }
+
+    function renderSummaryCard(summary) {
+      const panel = document.getElementById('campaign-summary');
+      const tone = summary && summary.tone ? summary.tone : 'idle';
+      const eyebrow = esc(summary && summary.eyebrow ? summary.eyebrow : '运行结果');
+      const title = esc(summary && summary.title ? summary.title : '等待执行');
+      const lines = Array.isArray(summary && summary.lines) ? summary.lines : [];
+      const metrics = Array.isArray(summary && summary.metrics) ? summary.metrics : [];
+      const bodyHtml = lines.length
+        ? lines.map((line) => `<p>${esc(line)}</p>`).join('')
+        : '<p>执行自动搜寻、补全邮箱、验证邮箱、同步 CRM 或拉取反馈后，这里会显示摘要。</p>';
+      const metricsHtml = metrics.length
+        ? `<div class="summary-metrics">${metrics.map((item) => `
+            <div class="summary-metric">
+              <span>${esc(item.label)}</span>
+              <strong>${esc(item.value)}</strong>
+            </div>
+          `).join('')}</div>`
+        : '';
+      panel.className = `summary-card summary-card--${tone}`;
+      panel.innerHTML = `
+        <div class="summary-eyebrow">${eyebrow}</div>
+        <div class="summary-title">${title}</div>
+        <div class="summary-body">${bodyHtml}</div>
+        ${metricsHtml}
+      `;
+    }
+
+    function formatRequalifySummary(result) {
+      if (!result || typeof result !== 'object') {
+        return {
+          tone: 'success',
+          eyebrow: '批量复核',
+          title: '已完成',
+          lines: ['批量复核已完成。'],
+        };
+      }
+      const reviewed = Number(result.reviewed || 0);
+      const qualified = Number(result.qualified || 0);
+      const rejected = Number(result.rejected || 0);
+      const needsReview = Number(result.needs_review || 0);
+      const errors = Number(result.errors || 0);
+      if (!reviewed && !errors) {
+        return {
+          tone: 'success',
+          eyebrow: '批量复核',
+          title: '没有可复核线索',
+          lines: ['批量复核已完成，本次没有可复核的旧线索。'],
+          metrics: [
+            {label: '复核', value: reviewed},
+            {label: '错误', value: errors},
+          ],
+        };
+      }
+      return {
+        tone: errors > 0 ? 'warn' : 'success',
+        eyebrow: '批量复核',
+        title: `已完成，共复核 ${reviewed} 条`,
+        lines: [
+          `已确认 ${qualified} 条，已拒绝 ${rejected} 条，待人工复核 ${needsReview} 条。`,
+          errors > 0 ? `处理错误 ${errors} 条。` : '没有处理错误。',
+        ],
+        metrics: [
+          {label: '复核', value: reviewed},
+          {label: '确认', value: qualified},
+          {label: '拒绝', value: rejected},
+          {label: '待复核', value: needsReview},
+        ],
+      };
+    }
+
+    function formatSyncCrmSummary(result) {
+      if (!result || typeof result !== 'object') {
+        return {
+          tone: 'success',
+          eyebrow: '同步 CRM',
+          title: '已完成',
+          lines: ['同步 CRM 已完成。'],
+        };
+      }
+      const attempted = Number(result.attempted || 0);
+      const synced = Number(result.synced || 0);
+      const duplicates = Number(result.duplicates || 0);
+      const skippedUnverified = Number(result.skipped_unverified || 0);
+      const errors = Number(result.errors || 0);
+      if (!attempted && !duplicates && !skippedUnverified && !errors) {
+        return {
+          tone: 'success',
+          eyebrow: '同步 CRM',
+          title: '没有可同步线索',
+          lines: ['同步 CRM 已完成，本次没有可同步的线索。'],
+          metrics: [
+            {label: '尝试', value: attempted},
+            {label: '跳过未验证', value: skippedUnverified},
+          ],
+        };
+      }
+      return {
+        tone: errors > 0 ? 'warn' : 'success',
+        eyebrow: '同步 CRM',
+        title: `已完成，尝试 ${attempted} 条`,
+        lines: [
+          `成功同步 ${synced} 条，CRM 已存在 ${duplicates} 条，未验证跳过 ${skippedUnverified} 条。`,
+          errors > 0 ? `同步失败 ${errors} 条。` : '没有同步错误。',
+        ],
+        metrics: [
+          {label: '尝试', value: attempted},
+          {label: '同步成功', value: synced},
+          {label: '已存在', value: duplicates},
+          {label: '未验证跳过', value: skippedUnverified},
+        ],
+      };
+    }
+
+    function formatCampaignSummary(result) {
+      if (!result || typeof result !== 'object') {
+        return {
+          tone: 'success',
+          eyebrow: '自动搜寻',
+          title: '已完成',
+          lines: ['自动搜寻已完成。'],
+        };
+      }
+      const runId = Number(result.run_id || 0);
+      const created = Number(result.created || 0);
+      const skipped = Number(result.skipped || 0);
+      const errors = Number(result.errors || 0);
+      const qualityAfter = result.quality_after || {};
+      const total = Number(qualityAfter.total || 0);
+      const withEmail = Number(qualityAfter.with_email || 0);
+      const highQuality = Number(qualityAfter.high_quality || 0);
+      const highScore = Number(qualityAfter.high_score || 0);
+      return {
+        tone: errors > 0 ? 'warn' : 'success',
+        eyebrow: '自动搜寻',
+        title: `已完成${runId ? `，任务 #${runId}` : ''}`,
+        lines: [
+          `本次新增 ${created} 条线索，跳过 ${skipped} 条。`,
+          `当前线索池共 ${total} 条，其中高分 ${highScore} 条、有邮箱 ${withEmail} 条、高质量 ${highQuality} 条。`,
+          errors > 0 ? `过程中出现 ${errors} 条错误。` : '过程中没有错误。',
+        ],
+        metrics: [
+          {label: '新增', value: created},
+          {label: '跳过', value: skipped},
+          {label: '高分', value: highScore},
+          {label: '有邮箱', value: withEmail},
+        ],
+      };
+    }
+
+    function formatEnrichSummary(result) {
+      if (!result || typeof result !== 'object') {
+        return {
+          tone: 'success',
+          eyebrow: '补全邮箱',
+          title: '已完成',
+          lines: ['补全邮箱已完成。'],
+        };
+      }
+      const attempted = Number(result.attempted || 0);
+      const emailsFound = Number(result.emails_found || 0);
+      const verified = Number(result.verified || 0);
+      const noEmail = Number(result.no_email || 0);
+      const errors = Number(result.errors || 0);
+      if (!attempted && !errors) {
+        return {
+          tone: 'success',
+          eyebrow: '补全邮箱',
+          title: '没有符合条件线索',
+          lines: ['补全邮箱已完成，本次没有符合条件的 Qualified 线索。'],
+          metrics: [
+            {label: '处理', value: attempted},
+            {label: '错误', value: errors},
+          ],
+        };
+      }
+      return {
+        tone: errors > 0 ? 'warn' : 'success',
+        eyebrow: '补全邮箱',
+        title: `已完成，共处理 ${attempted} 条`,
+        lines: [
+          `找到邮箱 ${emailsFound} 条，其中验证通过 ${verified} 条，未找到邮箱 ${noEmail} 条。`,
+          errors > 0 ? `处理错误 ${errors} 条。` : '没有处理错误。',
+        ],
+        metrics: [
+          {label: '处理', value: attempted},
+          {label: '找到邮箱', value: emailsFound},
+          {label: '验证通过', value: verified},
+          {label: '未找到', value: noEmail},
+        ],
+      };
+    }
+
+    function formatVerifySummary(result) {
+      if (!result || typeof result !== 'object') {
+        return {
+          tone: 'success',
+          eyebrow: '验证邮箱',
+          title: '已完成',
+          lines: ['邮箱验证已完成。'],
+        };
+      }
+      const attempted = Number(result.attempted || 0);
+      const valid = Number(result.valid || 0);
+      const invalid = Number(result.invalid || 0);
+      const other = Number(result.other || 0);
+      const errors = Number(result.errors || 0);
+      if (!attempted && !errors) {
+        return {
+          tone: 'success',
+          eyebrow: '验证邮箱',
+          title: '没有待验证邮箱',
+          lines: ['邮箱验证已完成，本次没有需要验证的 Qualified 邮箱。'],
+          metrics: [
+            {label: '验证', value: attempted},
+            {label: '错误', value: errors},
+          ],
+        };
+      }
+      return {
+        tone: errors > 0 ? 'warn' : 'success',
+        eyebrow: '验证邮箱',
+        title: `已完成，共验证 ${attempted} 条`,
+        lines: [
+          `有效 ${valid} 条，无效 ${invalid} 条，其它结果 ${other} 条。`,
+          errors > 0 ? `验证错误 ${errors} 条。` : '没有验证错误。',
+        ],
+        metrics: [
+          {label: '验证', value: attempted},
+          {label: '有效', value: valid},
+          {label: '无效', value: invalid},
+          {label: '其它', value: other},
+        ],
+      };
+    }
+
+    function formatPullFeedbackSummary(result) {
+      if (!result || typeof result !== 'object') {
+        return {
+          tone: 'success',
+          eyebrow: '拉取反馈',
+          title: '已完成',
+          lines: ['拉取 CRM 反馈已完成。'],
+        };
+      }
+      const matched = Number(result.matched || 0);
+      const updated = Number(result.updated || 0);
+      const unmatched = Number(result.unmatched || 0);
+      const errors = Number(result.errors || 0);
+      const outcomes = result.outcomes || {};
+      if (!matched && !unmatched && !errors) {
+        return {
+          tone: 'success',
+          eyebrow: '拉取反馈',
+          title: '没有可处理线索',
+          lines: ['拉取 CRM 反馈已完成，本次没有可处理的线索。'],
+          metrics: [
+            {label: '匹配', value: matched},
+            {label: '未匹配', value: unmatched},
+          ],
+        };
+      }
+      return {
+        tone: errors > 0 ? 'warn' : 'success',
+        eyebrow: '拉取反馈',
+        title: `已完成，匹配 ${matched} 条`,
+        lines: [
+          `本次更新 ${updated} 条，未匹配 ${unmatched} 条。`,
+          `反馈结果：有效客户 ${Number(outcomes.valid_customer || 0)} 条，非买家 ${Number(outcomes.not_buyer || 0)} 条，错市场 ${Number(outcomes.wrong_market || 0)} 条，重复 ${Number(outcomes.duplicate || 0)} 条，无回复 ${Number(outcomes.no_response || 0)} 条，勿联系 ${Number(outcomes.do_not_contact || 0)} 条。`,
+          errors > 0 ? `处理错误 ${errors} 条。` : '没有处理错误。',
+        ],
+        metrics: [
+          {label: '匹配', value: matched},
+          {label: '更新', value: updated},
+          {label: '有效客户', value: Number(outcomes.valid_customer || 0)},
+          {label: '勿联系', value: Number(outcomes.do_not_contact || 0)},
+        ],
+      };
     }
 
     function productFamilyLabel(value) {
@@ -597,6 +1166,7 @@ __PRODUCT_FAMILY_OPTIONS__
     }
 
     async function loadLeads() {
+      syncToolbarState();
       const filter = document.getElementById('status-filter').value;
       const params = new URLSearchParams({limit: String(state.limit)});
       params.set('offset', String(state.offset));
@@ -611,7 +1181,7 @@ __PRODUCT_FAMILY_OPTIONS__
       document.getElementById('next-page').disabled = currentResultLength !== state.limit;
       const tbody = document.getElementById('leads');
       if (!leads.length) {
-        tbody.innerHTML = '<tr><td class="empty" colspan="13">当前视图没有线索。</td></tr>';
+        tbody.innerHTML = '<tr><td class="empty" colspan="14">当前视图没有线索。</td></tr>';
         await loadStats();
         return;
       }
@@ -622,7 +1192,9 @@ __PRODUCT_FAMILY_OPTIONS__
           lead.review_status ? `复核: ${lead.review_status}` : '',
           lead.classification_status ? `分类: ${lead.classification_status}` : '',
           lead.classification_evidence ? `分类依据: ${lead.classification_evidence}` : '',
-          lead.score_explanation ? `评分依据: ${lead.score_explanation}` : ''
+          lead.score_explanation ? `评分依据: ${lead.score_explanation}` : '',
+          lead.crm_followup_status ? `CRM跟进: ${lead.crm_followup_status}` : '',
+          lead.crm_last_contact_at ? `CRM最近联系: ${lead.crm_last_contact_at}` : ''
         ].filter(Boolean).join(' | ');
         return `
           <tr>
@@ -637,6 +1209,7 @@ __PRODUCT_FAMILY_OPTIONS__
             <td class="state">${esc(stateLabel(lead.market_fit_status))}</td>
             <td class="state">${esc(stateLabel(lead.email_verification_status))}</td>
             <td class="state">${esc(stateLabel(lead.crm_sync_status))}</td>
+            <td class="state">${esc(stateLabel(lead.crm_outcome))}</td>
             <td class="source" title="${esc(lead.source_name)}">${esc(sourceLabel(lead.source_name))}</td>
             <td class="reason">${esc(lead.fit_reason)}${evidence ? `<div>${esc(evidence)}</div>` : ''}</td>
           </tr>
@@ -660,6 +1233,10 @@ __PRODUCT_FAMILY_OPTIONS__
       });
       document.getElementById('enrich-qualified').disabled = !state.hunter;
       document.getElementById('verify-qualified').disabled = !state.hunter;
+      if (!state.hunter) {
+        setActionButtonState('enrich-qualified', 'idle');
+        setActionButtonState('verify-qualified', 'idle');
+      }
     }
 
     async function loadUsage() {
@@ -699,48 +1276,105 @@ __PRODUCT_FAMILY_OPTIONS__
       `).join('');
     }
 
+    async function loadCrmFeedbackReport() {
+      const response = await fetch('/api/crm-feedback-report');
+      const payload = await response.json();
+      const rows = payload.rows || [];
+      const tbody = document.getElementById('crm-feedback-report');
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td class="empty" colspan="11">暂无 CRM 反馈。</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map((row) => `
+        <tr>
+          <td>${esc(row.country)}</td>
+          <td>${esc(productFamilyLabel(row.product_family))}</td>
+          <td>${esc(stateLabel(row.classification_status))}</td>
+          <td class="reason">${esc(row.discovery_query || '')}</td>
+          <td>${row.valid_customer || 0}</td>
+          <td>${row.not_buyer || 0}</td>
+          <td>${row.wrong_market || 0}</td>
+          <td>${row.duplicate || 0}</td>
+          <td>${row.no_response || 0}</td>
+          <td>${row.do_not_contact || 0}</td>
+          <td>${esc(stateLabel(row.suggestion))}</td>
+        </tr>
+      `).join('');
+    }
+
     async function loadCrmState() {
       const response = await fetch('/api/crm-state');
       const payload = await response.json();
       const available = Boolean(payload.available);
       document.getElementById('crm-state').textContent = available ? 'CRM 已连接' : 'CRM 未连接';
       document.getElementById('sync-crm').disabled = !available;
+      document.getElementById('pull-crm-feedback').disabled = !available;
+      if (!available) {
+        setActionButtonState('sync-crm', 'idle');
+        setActionButtonState('pull-crm-feedback', 'idle');
+      }
     }
 
     async function runCampaign() {
-      const summary = document.getElementById('campaign-summary');
+      const button = document.getElementById('run-campaign');
       const countries = Array.from(selectedCountries);
       if (!countries.length) {
-        summary.textContent = '请先选择至少 1 个目标国家。';
+        clearActionButtonStates(button.id);
+        renderActionSummary(button.id, {
+          tone: 'warn',
+          eyebrow: '自动搜寻',
+          title: '无法执行',
+          lines: ['请先选择至少 1 个目标国家。'],
+        });
         return;
       }
-      summary.textContent = '正在自动搜寻... 会消耗已启用 API 的额度，建议先用小批量验证。';
-      const response = await fetch('/api/campaign', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          hs_code: document.getElementById('campaign-hs').value,
-          year: Number(document.getElementById('campaign-year').value),
-          product: document.getElementById('campaign-product').value,
-          target_countries: countries,
-          per_market_limit: Number(document.getElementById('campaign-per-market').value),
-          use_serper: document.getElementById('campaign-serper').checked,
-          use_apollo: document.getElementById('campaign-apollo').checked,
-          use_hunter: document.getElementById('campaign-hunter').checked
-        })
+      button.disabled = true;
+      clearActionButtonStates(button.id);
+      setActionButtonState(button.id, 'working');
+      renderSummaryCard({
+        tone: 'working',
+        eyebrow: '自动搜寻',
+        title: '正在运行',
+        lines: ['正在自动搜寻，会消耗已启用 API 的额度，建议先用小批量验证。'],
       });
-      const payload = await response.json();
-      summary.textContent = JSON.stringify(payload.result || payload, null, 2);
-      await loadLeads();
-      await loadRecallReport(payload.result ? payload.result.run_id : '');
-      await loadUsage();
+      try {
+        const response = await fetch('/api/campaign', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            hs_code: document.getElementById('campaign-hs').value,
+            year: Number(document.getElementById('campaign-year').value),
+            product: document.getElementById('campaign-product').value,
+            target_countries: countries,
+            per_market_limit: Number(document.getElementById('campaign-per-market').value),
+            use_serper: document.getElementById('campaign-serper').checked,
+            use_apollo: document.getElementById('campaign-apollo').checked,
+            use_hunter: document.getElementById('campaign-hunter').checked
+          })
+        });
+        const payload = await response.json();
+        renderActionSummary(button.id, formatCampaignSummary(payload.result || payload));
+        await loadLeads();
+        await loadRecallReport(payload.result ? payload.result.run_id : '');
+        await loadUsage();
+      } catch (error) {
+        renderActionSummary(button.id, formatActionError('自动搜寻', error));
+      } finally {
+        button.disabled = false;
+      }
     }
 
     async function requalifyExistingLeads() {
-      const summary = document.getElementById('campaign-summary');
       const button = document.getElementById('requalify');
       button.disabled = true;
-      summary.textContent = '正在重新抓取并复核旧线索...';
+      clearActionButtonStates(button.id);
+      setActionButtonState(button.id, 'working');
+      renderSummaryCard({
+        tone: 'working',
+        eyebrow: '批量复核',
+        title: '正在运行',
+        lines: ['正在重新抓取并复核旧线索...'],
+      });
       try {
         const response = await fetch('/api/requalify', {
           method: 'POST',
@@ -748,18 +1382,26 @@ __PRODUCT_FAMILY_OPTIONS__
           body: JSON.stringify({limit: 100, only_unreviewed: true, min_score: 50})
         });
         const payload = await response.json();
-        summary.textContent = JSON.stringify(payload.result || payload, null, 2);
+        renderActionSummary(button.id, formatRequalifySummary(payload.result || payload));
         await loadLeads();
+      } catch (error) {
+        renderActionSummary(button.id, formatActionError('批量复核', error));
       } finally {
         button.disabled = false;
       }
     }
 
     async function enrichQualifiedEmails() {
-      const summary = document.getElementById('campaign-summary');
       const button = document.getElementById('enrich-qualified');
       button.disabled = true;
-      summary.textContent = '正在为已确认线索查询并验证邮箱...';
+      clearActionButtonStates(button.id);
+      setActionButtonState(button.id, 'working');
+      renderSummaryCard({
+        tone: 'working',
+        eyebrow: '补全邮箱',
+        title: '正在运行',
+        lines: ['正在为已确认线索查询并验证邮箱...'],
+      });
       try {
         const response = await fetch('/api/enrich-qualified', {
           method: 'POST',
@@ -767,18 +1409,26 @@ __PRODUCT_FAMILY_OPTIONS__
           body: JSON.stringify({limit: 5})
         });
         const payload = await response.json();
-        summary.textContent = JSON.stringify(payload.result || payload, null, 2);
+        renderActionSummary(button.id, formatEnrichSummary(payload.result || payload));
         await loadLeads();
+      } catch (error) {
+        renderActionSummary(button.id, formatActionError('补全邮箱', error));
       } finally {
         await loadProviderState();
       }
     }
 
     async function verifyQualifiedEmails() {
-      const summary = document.getElementById('campaign-summary');
       const button = document.getElementById('verify-qualified');
       button.disabled = true;
-      summary.textContent = '正在验证 Qualified 线索已有邮箱...';
+      clearActionButtonStates(button.id);
+      setActionButtonState(button.id, 'working');
+      renderSummaryCard({
+        tone: 'working',
+        eyebrow: '验证邮箱',
+        title: '正在运行',
+        lines: ['正在验证 Qualified 线索已有邮箱...'],
+      });
       try {
         const response = await fetch('/api/verify-qualified-emails', {
           method: 'POST',
@@ -786,18 +1436,26 @@ __PRODUCT_FAMILY_OPTIONS__
           body: JSON.stringify({limit: 10})
         });
         const payload = await response.json();
-        summary.textContent = JSON.stringify(payload.result || payload, null, 2);
+        renderActionSummary(button.id, formatVerifySummary(payload.result || payload));
         await loadLeads();
+      } catch (error) {
+        renderActionSummary(button.id, formatActionError('验证邮箱', error));
       } finally {
         await loadProviderState();
       }
     }
 
     async function syncCrm() {
-      const summary = document.getElementById('campaign-summary');
       const button = document.getElementById('sync-crm');
       button.disabled = true;
-      summary.textContent = '正在将已验证的 Qualified 线索同步到 CRM...';
+      clearActionButtonStates(button.id);
+      setActionButtonState(button.id, 'working');
+      renderSummaryCard({
+        tone: 'working',
+        eyebrow: '同步 CRM',
+        title: '正在运行',
+        lines: ['正在将已验证的 Qualified 线索同步到 CRM...'],
+      });
       try {
         const response = await fetch('/api/sync-crm', {
           method: 'POST',
@@ -805,8 +1463,38 @@ __PRODUCT_FAMILY_OPTIONS__
           body: JSON.stringify({limit: 50})
         });
         const payload = await response.json();
-        summary.textContent = JSON.stringify(payload.result || payload, null, 2);
+        renderActionSummary(button.id, formatSyncCrmSummary(payload.result || payload));
         await loadLeads();
+      } catch (error) {
+        renderActionSummary(button.id, formatActionError('同步 CRM', error));
+      } finally {
+        await loadCrmState();
+      }
+    }
+
+    async function pullCrmFeedback() {
+      const button = document.getElementById('pull-crm-feedback');
+      button.disabled = true;
+      clearActionButtonStates(button.id);
+      setActionButtonState(button.id, 'working');
+      renderSummaryCard({
+        tone: 'working',
+        eyebrow: '拉取反馈',
+        title: '正在运行',
+        lines: ['正在从 CRM 拉取跟进反馈...'],
+      });
+      try {
+        const response = await fetch('/api/pull-crm-feedback', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({limit: 500})
+        });
+        const payload = await response.json();
+        renderActionSummary(button.id, formatPullFeedbackSummary(payload.result || payload));
+        await loadLeads();
+        await loadCrmFeedbackReport();
+      } catch (error) {
+        renderActionSummary(button.id, formatActionError('拉取反馈', error));
       } finally {
         await loadCrmState();
       }
@@ -839,10 +1527,14 @@ __PRODUCT_FAMILY_OPTIONS__
       window.location.href = '/api/export-qualified';
     });
     document.getElementById('sync-crm').addEventListener('click', syncCrm);
+    document.getElementById('pull-crm-feedback').addEventListener('click', pullCrmFeedback);
     renderMarketPicker();
+    syncToolbarState();
+    renderSummaryCard();
     loadProviderState();
     loadUsage();
     loadRecallReport();
+    loadCrmFeedbackReport();
     loadCrmState();
     loadLeads();
   </script>
@@ -974,6 +1666,14 @@ class LocalLeadApp:
                 payload = {"available": False, "error": sanitize_error(error)}
             return self.json_response(payload)
 
+        if method == "GET" and parsed.path == "/api/crm-feedback-report":
+            db = connect(self.db_path)
+            try:
+                payload = crm_feedback_report(db)
+            finally:
+                db.close()
+            return self.json_response(payload)
+
         if method == "POST" and parsed.path == "/api/campaign":
             cfg = settings()
             payload = json.loads(body.decode("utf-8") or "{}")
@@ -1078,6 +1778,30 @@ class LocalLeadApp:
             db = connect(self.db_path)
             try:
                 result = sync_verified_qualified(
+                    db,
+                    cfg.crm_url,
+                    limit=limit,
+                    timeout=min(cfg.timeout_seconds, 8.0),
+                )
+            finally:
+                db.close()
+            return self.json_response({"result": result})
+
+        if method == "POST" and parsed.path == "/api/pull-crm-feedback":
+            cfg = settings()
+            payload = json.loads(body.decode("utf-8") or "{}")
+            raw_limit = payload.get("limit")
+            limit = None if raw_limit in (None, "", 0) else max(1, min(int(raw_limit), 1000))
+            try:
+                crm_status(cfg.crm_url, timeout=min(cfg.timeout_seconds, 3.0))
+            except Exception as error:
+                return self.json_response(
+                    {"error": sanitize_error(error)},
+                    status=503,
+                )
+            db = connect(self.db_path)
+            try:
+                result = pull_crm_feedback(
                     db,
                     cfg.crm_url,
                     limit=limit,

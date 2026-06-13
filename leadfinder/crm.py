@@ -3,13 +3,24 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from .db import list_leads, update_lead
+from .enrich import normalize_domain
 from .exporter import CRM_FIELDS
 from .security import sanitize_error
+
+OUTCOME_LABELS = (
+    "valid_customer",
+    "not_buyer",
+    "wrong_market",
+    "duplicate",
+    "no_response",
+    "do_not_contact",
+)
 
 
 def crm_status(base_url: str, timeout: float = 3.0) -> dict:
@@ -88,6 +99,78 @@ def sync_verified_qualified(
     return summary
 
 
+def pull_crm_feedback(
+    db,
+    base_url: str,
+    *,
+    limit: int | None = None,
+    timeout: float = 8.0,
+) -> dict:
+    payload = _request_json(base_url, "/api/leads", timeout=timeout)
+    remote_leads = payload.get("leads") if isinstance(payload, dict) else []
+    if not isinstance(remote_leads, list):
+        remote_leads = []
+    matched = 0
+    updated = 0
+    unmatched = 0
+    errors = 0
+    outcome_counts = {label: 0 for label in OUTCOME_LABELS}
+    remote_index = _build_remote_index(remote_leads)
+    local_rows = list_leads(db, limit=None)
+    if limit is not None:
+        local_rows = local_rows[: max(0, int(limit))]
+
+    for lead in local_rows:
+        remote = _match_remote_lead(lead, remote_index)
+        if remote is None:
+            unmatched += 1
+            continue
+        matched += 1
+        try:
+            outcome = infer_crm_outcome(remote, lead)
+            updates = {
+                "crm_followup_status": str(remote.get("status") or "").strip(),
+                "crm_last_contact_at": str(remote.get("last_contacted_at") or "").strip(),
+                "crm_outcome": outcome,
+            }
+            current = {
+                "crm_followup_status": str(lead.get("crm_followup_status") or "").strip(),
+                "crm_last_contact_at": str(lead.get("crm_last_contact_at") or "").strip(),
+                "crm_outcome": str(lead.get("crm_outcome") or "").strip(),
+            }
+            if updates != current:
+                update_lead(db, lead["id"], updates)
+                updated += 1
+            if outcome in outcome_counts:
+                outcome_counts[outcome] += 1
+        except Exception:
+            errors += 1
+    return {
+        "matched": matched,
+        "updated": updated,
+        "unmatched": unmatched,
+        "errors": errors,
+        "outcomes": outcome_counts,
+    }
+
+
+def infer_crm_outcome(remote_lead: dict, local_lead: dict | None = None) -> str:
+    notes = str(remote_lead.get("notes") or "").strip().lower()
+    status = str(remote_lead.get("status") or "").strip()
+    if status == "Unsubscribed" or str(remote_lead.get("unsubscribed_at") or "").strip():
+        return "do_not_contact"
+    if (local_lead or {}).get("crm_sync_status") == "duplicate":
+        return "duplicate"
+    explicit = _explicit_outcome(notes)
+    if explicit:
+        return explicit
+    if status == "Replied":
+        return "valid_customer"
+    if status == "Sent" and str(remote_lead.get("last_contacted_at") or "").strip():
+        return "no_response"
+    return ""
+
+
 def _is_verified(lead: dict) -> bool:
     status = str(lead.get("email_verification_status") or "").lower()
     notes = str(lead.get("notes") or "").lower()
@@ -105,6 +188,44 @@ def _lead_csv(lead: dict) -> str:
         }
     )
     return output.getvalue()
+
+
+def _build_remote_index(remote_leads: list[dict]) -> dict[str, dict[str, dict]]:
+    by_email: dict[str, dict] = {}
+    by_domain: dict[str, dict] = {}
+    by_company: dict[str, dict] = {}
+    for lead in remote_leads:
+        email = str(lead.get("email") or "").strip().lower()
+        if email and email not in by_email:
+            by_email[email] = lead
+        domain = normalize_domain(lead.get("website", ""))
+        if domain and domain not in by_domain:
+            by_domain[domain] = lead
+        company = str(lead.get("company_name") or "").strip().lower()
+        if company and company not in by_company:
+            by_company[company] = lead
+    return {"by_email": by_email, "by_domain": by_domain, "by_company": by_company}
+
+
+def _match_remote_lead(local_lead: dict, remote_index: dict[str, dict[str, dict]]) -> dict | None:
+    email = str(local_lead.get("email") or "").strip().lower()
+    if email and email in remote_index["by_email"]:
+        return remote_index["by_email"][email]
+    domain = normalize_domain(local_lead.get("website", ""))
+    if domain and domain in remote_index["by_domain"]:
+        return remote_index["by_domain"][domain]
+    company = str(local_lead.get("company_name") or "").strip().lower()
+    if company and company in remote_index["by_company"]:
+        return remote_index["by_company"][company]
+    return None
+
+
+def _explicit_outcome(notes: str) -> str:
+    for label in OUTCOME_LABELS:
+        pattern = rf"(?<![a-z_]){re.escape(label)}(?![a-z_])"
+        if re.search(pattern, notes):
+            return label
+    return ""
 
 
 def _request_json(

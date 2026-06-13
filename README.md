@@ -26,6 +26,9 @@ python cli.py import-csv --input exports/yizhijia.csv --source 易之家
 python cli.py import-csv --input exports/apollo.csv --source Apollo.io
 python cli.py import-csv --input exports/snov.csv --source Snov.io
 python cli.py enrich --limit 100
+python cli.py sync-crm --limit 50
+python cli.py pull-crm-feedback
+python cli.py crm-feedback-report
 python cli.py export --output exports/sourced_leads.csv
 python cli.py serve
 python cli.py stats
@@ -86,6 +89,13 @@ python cli.py campaign --market-limit 1 --per-market-limit 3
 - Region and country selection still control target markets, but Stage B now tracks productivity per country instead of only total leads.
 - Use `python cli.py recall-report` or the workbench recall table to compare which locales and product families produce Qualified buyers and valid emails.
 - The success metric is Qualified leads per Serper query, not raw lead volume.
+
+## CRM feedback workflow
+
+- Use `python cli.py sync-crm --limit 50` to push verified Qualified leads into the local CRM.
+- Use `python cli.py pull-crm-feedback` to pull CRM follow-up status back into lead-finder manually.
+- Use `python cli.py crm-feedback-report` or the workbench CRM feedback table to see which countries, search terms, and classification rules produce valid customers, no-response leads, duplicates, or do-not-contact outcomes.
+- Stage C does not send emails automatically. It only pulls feedback signals back for scoring and prioritization decisions.
 
 ## Accuracy gates
 

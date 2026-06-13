@@ -93,9 +93,9 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("玻纤外贸获客工作台", html)
         self.assertIn(b"/api/leads", body)
         self.assertIn("开始自动搜寻", html)
-        self.assertIn("批量复核旧线索", html)
-        self.assertIn("补全合格线索邮箱", html)
-        self.assertIn("验证已有邮箱", html)
+        self.assertIn("批量复核", html)
+        self.assertIn("补全邮箱", html)
+        self.assertIn("验证邮箱", html)
         self.assertIn("701912", html)
         self.assertIn("北美", html)
 
@@ -105,11 +105,13 @@ class WebAppTests(unittest.TestCase):
         html = body.decode("utf-8")
 
         self.assertEqual(status, 200)
-        self.assertIn("grid-template-columns: minmax(280px, 1fr) minmax(0, 3fr);", html)
+        self.assertIn("grid-template-columns: minmax(0, 1fr);", html)
+        self.assertIn('class="toolbar-group filters"', html)
+        self.assertIn("function syncToolbarState()", html)
         self.assertIn("header { grid-template-columns: minmax(0, 1fr); padding: 18px; }", html)
-        self.assertIn("高置信 Qualified", html)
-        self.assertIn("待人工复核", html)
-        self.assertIn("疑似供应商误判", html)
+        self.assertIn("高置信", html)
+        self.assertIn("待复核", html)
+        self.assertIn("供应商误判", html)
         self.assertIn("抓取失败", html)
         self.assertIn('id="previous-page"', html)
         self.assertIn('id="next-page"', html)
@@ -131,6 +133,18 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("function loadRecallReport", html)
         self.assertIn("await loadRecallReport(payload.result ? payload.result.run_id : '')", html)
         self.assertIn("loadRecallReport();", html)
+        self.assertIn('id="pull-crm-feedback"', html)
+        self.assertIn("拉取反馈", html)
+        self.assertIn("CRM反馈总结", html)
+        self.assertIn('id="crm-feedback-report"', html)
+        self.assertIn("function loadCrmFeedbackReport", html)
+        self.assertIn("function formatCampaignSummary", html)
+        self.assertIn("function formatEnrichSummary", html)
+        self.assertIn("function formatVerifySummary", html)
+        self.assertIn("function formatPullFeedbackSummary", html)
+        self.assertIn("function renderSummaryCard", html)
+        self.assertIn('id="campaign-summary"', html)
+        self.assertIn("summary-card", html)
 
     def test_api_leads_supports_review_filter(self) -> None:
         db = connect(self.db_path)
@@ -624,6 +638,54 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(payload["available"])
         self.assertNotIn("secret", payload["error"])
+
+    def test_api_crm_feedback_report_returns_rows(self) -> None:
+        db = connect(self.db_path)
+        try:
+            create_or_skip_lead(
+                db,
+                {
+                    "company_name": "CRM Buyer",
+                    "website": "https://crm.example",
+                    "country_region": "Germany",
+                    "product_family": "roving",
+                    "classification_status": "buyer",
+                    "discovery_query": "demo query",
+                    "crm_outcome": "valid_customer",
+                },
+            )
+        finally:
+            db.close()
+
+        status, headers, body = make_app(self.db_path).handle("GET", "/api/crm-feedback-report", b"")
+        payload = json.loads(body.decode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
+        self.assertEqual(payload["rows"][0]["country"], "Germany")
+        self.assertEqual(payload["rows"][0]["valid_customer"], 1)
+
+    def test_api_pull_crm_feedback_returns_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_app(Path(tmp) / "leadfinder.sqlite")
+            expected = {
+                "matched": 2,
+                "updated": 2,
+                "unmatched": 0,
+                "errors": 0,
+                "outcomes": {"valid_customer": 1},
+            }
+            with patch("leadfinder.webapp.crm_status", return_value={"available": True}):
+                with patch("leadfinder.webapp.pull_crm_feedback", return_value=expected):
+                    status, headers, body = app.handle(
+                        "POST",
+                        "/api/pull-crm-feedback",
+                        json.dumps({"limit": 50}).encode("utf-8"),
+                    )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/json; charset=utf-8")
+        self.assertEqual(json.loads(body.decode("utf-8"))["result"], expected)
 
     def test_api_requalify_returns_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
