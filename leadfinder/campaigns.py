@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from .apollo import apollo_people_to_contact
@@ -19,8 +20,9 @@ from .hunter import hunter_domain_to_email, hunter_verification_note
 from .market_fit import market_fit_note, validate_target_market
 from .markets import fallback_markets, fetch_comtrade_markets
 from .quality import quality_report
+from .query_catalog import build_query_specs
 from .scoring import score_lead
-from .serper import build_queries, results_to_leads
+from .serper import results_to_leads
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,25 @@ def _effective_product(hs_code: str, product: str) -> str:
 def _append_note(existing: str, note: str) -> str:
     parts = [part for part in [existing.strip(), note.strip()] if part]
     return "\n".join(parts)
+
+
+def _serper_event_message(
+    *,
+    country: str,
+    locale: str,
+    product_family: str,
+    query: str,
+    error: str | None = None,
+) -> str:
+    payload = {
+        "country": country,
+        "locale": locale,
+        "product_family": product_family,
+        "query": query[:400],
+    }
+    if error is not None:
+        payload["error"] = str(error)[:240]
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def run_campaign(
@@ -159,11 +180,18 @@ def run_campaign(
             for market in selected_markets:
                 country = market.get("country_region", "")
                 created_for_market = 0
-                queries = build_queries(country, effective_product)
-                query_limit = max(4, min(8, int(options.per_market_limit)))
-                for query in queries[:query_limit]:
+                query_specs = build_query_specs(country, options.hs_code, effective_product)
+                query_limit = min(len(query_specs), max(4, min(8, int(options.per_market_limit))))
+                for spec in query_specs[:query_limit]:
                     if created_for_market >= int(options.per_market_limit):
                         break
+                    query = spec["query"]
+                    serper_message = _serper_event_message(
+                        country=country,
+                        locale=spec["locale"],
+                        product_family=spec["product_family"],
+                        query=query,
+                    )
                     try:
                         payload = serper_client.search(query, num=max(1, min(options.per_market_limit, 100)))
                         record_provider_event(
@@ -173,7 +201,7 @@ def run_campaign(
                             event_type="search",
                             status="ok",
                             cost_units=1,
-                            message=query,
+                            message=serper_message,
                         )
                     except Exception as error:
                         errors += 1
@@ -184,11 +212,24 @@ def run_campaign(
                             event_type="search",
                             status="error",
                             cost_units=0,
-                            message=str(error),
+                            message=_serper_event_message(
+                                country=country,
+                                locale=spec["locale"],
+                                product_family=spec["product_family"],
+                                query=query,
+                                error=str(error),
+                            ),
                         )
                         continue
                     for lead in results_to_leads(payload, country, query):
-                        scored = {**lead, **score_lead(lead)}
+                        scored = {
+                            **lead,
+                            "campaign_run_id": run_id,
+                            "discovery_query": query,
+                            "query_locale": spec["locale"],
+                            "product_family": spec["product_family"],
+                        }
+                        scored = {**scored, **score_lead(scored)}
                         if int(scored.get("match_score") or 0) < min(int(options.min_score), 35):
                             skipped += 1
                             record_provider_event(

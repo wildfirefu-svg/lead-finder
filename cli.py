@@ -15,6 +15,7 @@ from leadfinder.importers import import_csv
 from leadfinder.markets import fallback_markets, fetch_comtrade_markets
 from leadfinder.providers import provider_report
 from leadfinder.quality import quality_report
+from leadfinder.recall import recall_report
 from leadfinder.scoring import score_lead
 from leadfinder.serper import SerperClient, build_queries, results_to_leads
 from leadfinder.webapp import serve
@@ -153,6 +154,17 @@ def cmd_provider_report(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recall_report(args: argparse.Namespace) -> int:
+    cfg = settings()
+    db = connect(cfg.db_path)
+    try:
+        report = recall_report(db, run_id=args.run_id)
+    finally:
+        db.close()
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     cfg = settings()
     serve(cfg.db_path, host=args.host, port=args.port)
@@ -247,6 +259,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     provider_parser = sub.add_parser("provider-report", help="Show source provider cost and allowed-use classification.")
     provider_parser.set_defaults(func=cmd_provider_report)
+
+    recall_parser = sub.add_parser("recall-report", help="Show campaign-run recall productivity grouped by market and product family.")
+    recall_parser.add_argument("--run-id", type=int, default=None)
+    recall_parser.set_defaults(func=cmd_recall_report)
 
     serve_parser = sub.add_parser("serve", help="Run the private local lead workbench.")
     serve_parser.add_argument("--host", default="127.0.0.1")
