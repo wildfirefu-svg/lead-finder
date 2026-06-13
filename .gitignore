@@ -11,3 +11,4 @@ data/*.sqlite
 data/*.sqlite-*
 exports/
 backups/
+runtime/

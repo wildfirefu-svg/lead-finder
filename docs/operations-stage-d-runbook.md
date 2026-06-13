@@ -91,6 +91,12 @@ then fix the budget or wait for the next day before rerunning.
 python cli.py serve
 ```
 
+Or start the managed background process:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\leadfinder-workbench.ps1 -Action start
+```
+
 2. Open:
 
 - Lead Finder: `http://127.0.0.1:8765`
@@ -201,6 +207,19 @@ python cli.py serve
 ```
 
 If the port is occupied, stop the old process and restart.
+
+Preferred managed commands:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\leadfinder-workbench.ps1 -Action status
+powershell -ExecutionPolicy Bypass -File .\tools\leadfinder-workbench.ps1 -Action restart
+```
+
+Managed runtime files:
+
+- `runtime/leadfinder-8765.pid`
+- `runtime/leadfinder-8765.out.log`
+- `runtime/leadfinder-8765.err.log`
 
 ### CRM not connected
 

@@ -84,6 +84,15 @@ source_type, source_name, company_name, country_region, market_region, website, 
 
 Run `python cli.py serve` and open `http://127.0.0.1:8765`.
 
+For a managed background process on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\leadfinder-workbench.ps1 -Action start
+powershell -ExecutionPolicy Bypass -File .\tools\leadfinder-workbench.ps1 -Action status
+powershell -ExecutionPolicy Bypass -File .\tools\leadfinder-workbench.ps1 -Action restart
+powershell -ExecutionPolicy Bypass -File .\tools\leadfinder-workbench.ps1 -Action stop
+```
+
 Use the workbench to review leads, inspect source and fit, and decide which leads should be exported for CRM follow-up.
 
 ## Campaign workflow
