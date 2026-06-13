@@ -22,6 +22,10 @@ LEADFINDER_HUNTER_RUN_LIMIT=10
 LEADFINDER_HUNTER_DAILY_LIMIT=50
 ```
 
+Operations runbook:
+
+- `docs/operations-stage-d-runbook.md`
+
 ## Commands
 
 ```powershell
@@ -95,6 +99,22 @@ Use small limits first:
 ```powershell
 python cli.py campaign --market-limit 1 --per-market-limit 3
 ```
+
+## Backup and recovery
+
+Create backup:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\backup-leadfinder.ps1 -DestinationRoot C:\tmp -IncludeExports
+```
+
+Restore backup:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\restore-leadfinder.ps1 -BackupPath C:\tmp\leadfinder-backup-YYYYMMDD-HHMMSS -RestoreExports
+```
+
+For troubleshooting, safe reruns, and CRM/workbench recovery steps, see `docs/operations-stage-d-runbook.md`.
 
 ## Recall workflow
 
