@@ -12,6 +12,7 @@ from .db import list_leads, update_lead
 from .enrich import normalize_domain
 from .exporter import CRM_FIELDS
 from .security import sanitize_error
+from .stability import call_with_limited_retry
 
 OUTCOME_LABELS = (
     "valid_customer",
@@ -248,8 +249,10 @@ def _request_json(
         headers={"Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8") or "{}")
+        return call_with_limited_retry(
+            lambda: _read_json_response(request, timeout),
+            retries=1,
+        )
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"CRM HTTP {error.code}: {detail}") from error
@@ -257,3 +260,8 @@ def _request_json(
 
 def _append_note(existing: str, note: str) -> str:
     return "\n".join(part for part in [str(existing or "").strip(), note.strip()] if part)
+
+
+def _read_json_response(request, timeout: float) -> dict:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8") or "{}")

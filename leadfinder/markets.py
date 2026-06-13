@@ -6,6 +6,8 @@ import urllib.parse
 import urllib.request
 import urllib.error
 
+from .stability import call_with_limited_retry
+
 FALLBACK_MARKETS = [
     ("USA", 0),
     ("Germany", 0),
@@ -57,8 +59,10 @@ def _fetch_comtrade_payload(url: str, timeout: float) -> dict:
             headers["Ocp-Apim-Subscription-Key"] = key
         request = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+            return call_with_limited_retry(
+                lambda: _read_json_response(request, timeout),
+                retries=1,
+            )
         except urllib.error.HTTPError as error:
             last_error = error
             if error.code in {401, 403} and key and key != keys[-1]:
@@ -75,6 +79,11 @@ def _comtrade_subscription_keys() -> list[str]:
         os.getenv("COMTRADE_API_KEY_SECONDARY", "").strip(),
     ]
     return list(dict.fromkeys(key for key in keys if key))
+
+
+def _read_json_response(request, timeout: float) -> dict:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 def fallback_markets(hs_code: str, year: int) -> list[dict]:

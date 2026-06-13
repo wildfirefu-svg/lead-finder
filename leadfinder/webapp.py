@@ -12,7 +12,17 @@ from .campaigns import CampaignOptions, run_campaign
 from .config import settings
 from .contact_enrichment import enrich_qualified_emails, verify_existing_qualified_emails
 from .crm import crm_status, pull_crm_feedback, sync_verified_qualified
-from .db import connect, latest_provider_usage, list_leads, stats, update_lead
+from .db import (
+    connect,
+    create_run_log,
+    daily_run_usage,
+    finish_run_log,
+    latest_provider_usage,
+    list_leads,
+    record_run_usage,
+    stats,
+    update_lead,
+)
 from .evidence import parse_score_evidence, review_status_for_lead, score_reason_text
 from .exporter import export_csv_bytes
 from .feedback import crm_feedback_report
@@ -22,6 +32,7 @@ from .recall import recall_report
 from .requalify import RequalifyOptions, requalify_leads
 from .security import sanitize_error
 from .serper import SerperClient
+from .stability import BudgetManager, budget_limits_from_settings, budget_snapshot
 
 
 ALLOWED_STATUSES = {"Discovered", "Enriched", "Qualified", "Rejected", "Error"}
@@ -946,20 +957,23 @@ __PRODUCT_FAMILY_OPTIONS__
       const withEmail = Number(qualityAfter.with_email || 0);
       const highQuality = Number(qualityAfter.high_quality || 0);
       const highScore = Number(qualityAfter.high_score || 0);
+      const budgetStops = Array.isArray(result.budget_stops) ? result.budget_stops : [];
       return {
-        tone: errors > 0 ? 'warn' : 'success',
+        tone: errors > 0 || budgetStops.length > 0 ? 'warn' : 'success',
         eyebrow: '自动搜寻',
         title: `已完成${runId ? `，任务 #${runId}` : ''}`,
         lines: [
           `本次新增 ${created} 条线索，跳过 ${skipped} 条。`,
           `当前线索池共 ${total} 条，其中高分 ${highScore} 条、有邮箱 ${withEmail} 条、高质量 ${highQuality} 条。`,
           errors > 0 ? `过程中出现 ${errors} 条错误。` : '过程中没有错误。',
-        ],
+          budgetStops.length ? `额度保护已触发：${budgetStops.map((item) => item.message || '').filter(Boolean).join('；')}` : '',
+        ].filter(Boolean),
         metrics: [
           {label: '新增', value: created},
           {label: '跳过', value: skipped},
           {label: '高分', value: highScore},
           {label: '有邮箱', value: withEmail},
+          ...(budgetStops.length ? [{label: '额度触发', value: budgetStops.length}] : []),
         ],
       };
     }
@@ -978,12 +992,16 @@ __PRODUCT_FAMILY_OPTIONS__
       const verified = Number(result.verified || 0);
       const noEmail = Number(result.no_email || 0);
       const errors = Number(result.errors || 0);
+      const budgetStops = Array.isArray(result.budget_stops) ? result.budget_stops : [];
       if (!attempted && !errors) {
         return {
-          tone: 'success',
+          tone: budgetStops.length ? 'warn' : 'success',
           eyebrow: '补全邮箱',
-          title: '没有符合条件线索',
-          lines: ['补全邮箱已完成，本次没有符合条件的 Qualified 线索。'],
+          title: budgetStops.length ? '额度已触发' : '没有符合条件线索',
+          lines: [
+            '补全邮箱已完成，本次没有符合条件的 Qualified 线索。',
+            budgetStops.length ? budgetStops.map((item) => item.message || '').filter(Boolean).join('；') : '',
+          ].filter(Boolean),
           metrics: [
             {label: '处理', value: attempted},
             {label: '错误', value: errors},
@@ -991,18 +1009,20 @@ __PRODUCT_FAMILY_OPTIONS__
         };
       }
       return {
-        tone: errors > 0 ? 'warn' : 'success',
+        tone: errors > 0 || budgetStops.length ? 'warn' : 'success',
         eyebrow: '补全邮箱',
         title: `已完成，共处理 ${attempted} 条`,
         lines: [
           `找到邮箱 ${emailsFound} 条，其中验证通过 ${verified} 条，未找到邮箱 ${noEmail} 条。`,
           errors > 0 ? `处理错误 ${errors} 条。` : '没有处理错误。',
-        ],
+          budgetStops.length ? `额度保护已触发：${budgetStops.map((item) => item.message || '').filter(Boolean).join('；')}` : '',
+        ].filter(Boolean),
         metrics: [
           {label: '处理', value: attempted},
           {label: '找到邮箱', value: emailsFound},
           {label: '验证通过', value: verified},
           {label: '未找到', value: noEmail},
+          ...(budgetStops.length ? [{label: '额度触发', value: budgetStops.length}] : []),
         ],
       };
     }
@@ -1021,12 +1041,16 @@ __PRODUCT_FAMILY_OPTIONS__
       const invalid = Number(result.invalid || 0);
       const other = Number(result.other || 0);
       const errors = Number(result.errors || 0);
+      const budgetStops = Array.isArray(result.budget_stops) ? result.budget_stops : [];
       if (!attempted && !errors) {
         return {
-          tone: 'success',
+          tone: budgetStops.length ? 'warn' : 'success',
           eyebrow: '验证邮箱',
-          title: '没有待验证邮箱',
-          lines: ['邮箱验证已完成，本次没有需要验证的 Qualified 邮箱。'],
+          title: budgetStops.length ? '额度已触发' : '没有待验证邮箱',
+          lines: [
+            '邮箱验证已完成，本次没有需要验证的 Qualified 邮箱。',
+            budgetStops.length ? budgetStops.map((item) => item.message || '').filter(Boolean).join('；') : '',
+          ].filter(Boolean),
           metrics: [
             {label: '验证', value: attempted},
             {label: '错误', value: errors},
@@ -1034,18 +1058,20 @@ __PRODUCT_FAMILY_OPTIONS__
         };
       }
       return {
-        tone: errors > 0 ? 'warn' : 'success',
+        tone: errors > 0 || budgetStops.length ? 'warn' : 'success',
         eyebrow: '验证邮箱',
         title: `已完成，共验证 ${attempted} 条`,
         lines: [
           `有效 ${valid} 条，无效 ${invalid} 条，其它结果 ${other} 条。`,
           errors > 0 ? `验证错误 ${errors} 条。` : '没有验证错误。',
-        ],
+          budgetStops.length ? `额度保护已触发：${budgetStops.map((item) => item.message || '').filter(Boolean).join('；')}` : '',
+        ].filter(Boolean),
         metrics: [
           {label: '验证', value: attempted},
           {label: '有效', value: valid},
           {label: '无效', value: invalid},
           {label: '其它', value: other},
+          ...(budgetStops.length ? [{label: '额度触发', value: budgetStops.length}] : []),
         ],
       };
     }
@@ -1243,9 +1269,22 @@ __PRODUCT_FAMILY_OPTIONS__
       const response = await fetch('/api/usage');
       const payload = await response.json();
       const usage = payload.usage || {};
-      document.getElementById('usage-serper').textContent = usage.Serper || 0;
-      document.getElementById('usage-hunter').textContent = usage['Hunter.io'] || 0;
-      document.getElementById('usage-apollo').textContent = usage['Apollo.io'] || 0;
+      const daily = payload.daily_usage || {};
+      const budgets = payload.budgets || {};
+      setUsageLabel('usage-serper', usage.Serper || 0, daily.Serper || 0, budgets.Serper || {});
+      setUsageLabel('usage-hunter', usage['Hunter.io'] || 0, daily['Hunter.io'] || 0, budgets['Hunter.io'] || {});
+      setUsageLabel('usage-apollo', usage['Apollo.io'] || 0, daily['Apollo.io'] || 0, budgets['Apollo.io'] || {});
+    }
+
+    function setUsageLabel(elementId, latest, daily, budget) {
+      const element = document.getElementById(elementId);
+      if (!element) return;
+      const latestText = Number(latest || 0);
+      const dailyText = Number(daily || 0);
+      const dailyLimit = Number((budget || {}).daily_limit || 0);
+      element.textContent = dailyLimit > 0
+        ? `${latestText} · 今日 ${dailyText}/${dailyLimit}`
+        : `${latestText} · 今日 ${dailyText}`;
     }
 
     async function loadRecallReport(runId = '') {
@@ -1547,6 +1586,45 @@ INDEX_HTML = INDEX_HTML.replace("__PRODUCT_FAMILY_OPTIONS__", PRODUCT_FAMILY_OPT
 )
 
 
+def _start_action_log(db, run_type: str, metadata: dict | None = None) -> dict:
+    return create_run_log(
+        db,
+        run_type,
+        trigger_source="webapp",
+        metadata=metadata or {},
+    )
+
+
+def _finish_action_log(db, run_log_id: int, *, status: str, result: dict, error_summary: str = "") -> dict:
+    return finish_run_log(
+        db,
+        run_log_id,
+        status=status,
+        success_count=int(result.get("synced") or result.get("updated") or result.get("verified") or result.get("valid") or result.get("created") or result.get("reviewed") or 0),
+        failure_count=int(result.get("errors") or 0),
+        skipped_count=int(result.get("skipped") or result.get("duplicates") or result.get("no_email") or result.get("skipped_unverified") or result.get("unmatched") or result.get("other") or 0),
+        error_summary=error_summary,
+        metadata=result,
+    )
+
+
+def _record_summary_usage(db, run_log_id: int, provider: str, event_type: str, summary: dict) -> None:
+    cost_units = 0.0
+    if provider == "CRM" and event_type == "sync":
+        cost_units = float(summary.get("attempted", 0) or 0)
+    elif provider == "CRM" and event_type == "pull_feedback":
+        cost_units = float(summary.get("matched", 0) or 0)
+    record_run_usage(
+        db,
+        run_log_id,
+        provider=provider,
+        event_type=event_type,
+        status="ok" if not int(summary.get("errors") or 0) else "warn",
+        cost_units=cost_units,
+        message=json.dumps(summary, ensure_ascii=False),
+    )
+
+
 @dataclass(frozen=True)
 class LocalLeadApp:
     db_path: Path
@@ -1612,9 +1690,16 @@ class LocalLeadApp:
             return self.json_response(payload)
 
         if method == "GET" and parsed.path == "/api/usage":
+            cfg = settings()
             db = connect(self.db_path)
             try:
                 payload = latest_provider_usage(db)
+                payload["daily_usage"] = daily_run_usage(db, providers=["Serper", "Hunter.io", "Apollo.io"])
+                payload["budgets"] = budget_snapshot(
+                    db,
+                    cfg,
+                    payload.get("run", {}).get("id") if isinstance(payload.get("run"), dict) else None,
+                )
             finally:
                 db.close()
             return self.json_response(payload)
@@ -1709,6 +1794,7 @@ class LocalLeadApp:
                     serper_client=SerperClient(cfg.serper_api_key, timeout=cfg.timeout_seconds) if use_serper else None,
                     apollo_client=ApolloClient(cfg.apollo_api_key, timeout=cfg.timeout_seconds) if use_apollo else None,
                     hunter_client=HunterClient(cfg.hunter_api_key, timeout=cfg.timeout_seconds) if use_hunter else None,
+                    budget_limits=budget_limits_from_settings(cfg),
                 )
             finally:
                 db.close()
@@ -1725,7 +1811,9 @@ class LocalLeadApp:
             )
             db = connect(self.db_path)
             try:
+                run_log = _start_action_log(db, "requalify", {"limit": options.limit, "min_score": options.min_score})
                 result = requalify_leads(db, options)
+                _finish_action_log(db, run_log["id"], status="Completed", result=result)
             finally:
                 db.close()
             return self.json_response({"result": result})
@@ -1738,10 +1826,20 @@ class LocalLeadApp:
             limit = max(1, min(int(payload.get("limit") or 5), 50))
             db = connect(self.db_path)
             try:
+                run_log = _start_action_log(db, "enrich_qualified", {"limit": limit})
+                budget_manager = BudgetManager(db, run_log["id"], budget_limits_from_settings(cfg))
                 result = enrich_qualified_emails(
                     db,
                     HunterClient(cfg.hunter_api_key, timeout=cfg.timeout_seconds),
                     limit=limit,
+                    budget_manager=budget_manager,
+                )
+                _finish_action_log(
+                    db,
+                    run_log["id"],
+                    status="Completed",
+                    result=result,
+                    error_summary="; ".join(item.get("message", "") for item in result.get("budget_stops", []) if item.get("message")),
                 )
             finally:
                 db.close()
@@ -1755,10 +1853,20 @@ class LocalLeadApp:
             limit = max(1, min(int(payload.get("limit") or 10), 50))
             db = connect(self.db_path)
             try:
+                run_log = _start_action_log(db, "verify_qualified_emails", {"limit": limit})
+                budget_manager = BudgetManager(db, run_log["id"], budget_limits_from_settings(cfg))
                 result = verify_existing_qualified_emails(
                     db,
                     HunterClient(cfg.hunter_api_key, timeout=cfg.timeout_seconds),
                     limit=limit,
+                    budget_manager=budget_manager,
+                )
+                _finish_action_log(
+                    db,
+                    run_log["id"],
+                    status="Completed",
+                    result=result,
+                    error_summary="; ".join(item.get("message", "") for item in result.get("budget_stops", []) if item.get("message")),
                 )
             finally:
                 db.close()
@@ -1777,12 +1885,15 @@ class LocalLeadApp:
                 )
             db = connect(self.db_path)
             try:
+                run_log = _start_action_log(db, "sync_crm", {"limit": limit})
                 result = sync_verified_qualified(
                     db,
                     cfg.crm_url,
                     limit=limit,
                     timeout=min(cfg.timeout_seconds, 8.0),
                 )
+                _record_summary_usage(db, run_log["id"], "CRM", "sync", result)
+                _finish_action_log(db, run_log["id"], status="Completed", result=result)
             finally:
                 db.close()
             return self.json_response({"result": result})
@@ -1801,12 +1912,15 @@ class LocalLeadApp:
                 )
             db = connect(self.db_path)
             try:
+                run_log = _start_action_log(db, "pull_crm_feedback", {"limit": limit})
                 result = pull_crm_feedback(
                     db,
                     cfg.crm_url,
                     limit=limit,
                     timeout=min(cfg.timeout_seconds, 8.0),
                 )
+                _record_summary_usage(db, run_log["id"], "CRM", "pull_feedback", result)
+                _finish_action_log(db, run_log["id"], status="Completed", result=result)
             finally:
                 db.close()
             return self.json_response({"result": result})

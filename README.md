@@ -11,6 +11,17 @@ python cli.py stats
 
 Edit `.env` and set `SERPER_API_KEY` before running live discovery.
 
+Optional Stage D soft limits can also be set in `.env`. Use `0` to disable a limit:
+
+```powershell
+LEADFINDER_SERPER_RUN_LIMIT=10
+LEADFINDER_SERPER_DAILY_LIMIT=50
+LEADFINDER_APOLLO_RUN_LIMIT=10
+LEADFINDER_APOLLO_DAILY_LIMIT=50
+LEADFINDER_HUNTER_RUN_LIMIT=10
+LEADFINDER_HUNTER_DAILY_LIMIT=50
+```
+
 ## Commands
 
 ```powershell
@@ -76,6 +87,8 @@ Use the workbench to review leads, inspect source and fit, and decide which lead
 The `campaign` command runs Comtrade market selection, Serper discovery, optional Apollo contact lookup, optional Hunter email lookup and verification, then records quality before and after the run.
 
 Serper, Apollo, and Hunter are optional credit-based providers. Missing API keys disable those providers rather than failing the whole campaign.
+If a configured per-run or daily budget is reached, the campaign stops calling that provider and shows the stop reason in the workbench summary.
+To avoid repeated charges, automatic retry is kept for public/local calls such as Comtrade, local CRM, and website crawl fallback. Paid provider calls stay budget-gated and conservative.
 
 Use small limits first:
 

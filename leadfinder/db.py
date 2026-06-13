@@ -98,6 +98,32 @@ CREATE TABLE IF NOT EXISTS provider_events (
   message TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS run_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_type TEXT NOT NULL DEFAULT '',
+  trigger_source TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'Running',
+  related_run_id INTEGER NOT NULL DEFAULT 0,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  error_summary TEXT NOT NULL DEFAULT '',
+  metadata TEXT NOT NULL DEFAULT '{}',
+  started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS run_usage_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_log_id INTEGER NOT NULL,
+  provider TEXT NOT NULL DEFAULT '',
+  event_type TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT '',
+  cost_units REAL NOT NULL DEFAULT 0,
+  message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 LEAD_FIELDS = [
@@ -296,7 +322,153 @@ def list_provider_events(db: sqlite3.Connection, campaign_run_id: int) -> list[d
     return [dict(row) for row in rows]
 
 
+def create_run_log(
+    db: sqlite3.Connection,
+    run_type: str,
+    *,
+    trigger_source: str = "",
+    related_run_id: int = 0,
+    metadata: dict | None = None,
+) -> dict:
+    db.execute(
+        """
+        INSERT INTO run_logs (run_type, trigger_source, related_run_id, metadata)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            str(run_type or "").strip(),
+            str(trigger_source or "").strip(),
+            int(related_run_id or 0),
+            _json_text(metadata or {}),
+        ),
+    )
+    db.commit()
+    return dict(db.execute("SELECT * FROM run_logs WHERE id = last_insert_rowid()").fetchone())
+
+
+def finish_run_log(
+    db: sqlite3.Connection,
+    run_log_id: int,
+    *,
+    status: str,
+    success_count: int = 0,
+    failure_count: int = 0,
+    skipped_count: int = 0,
+    error_summary: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    db.execute(
+        """
+        UPDATE run_logs
+        SET status = ?, success_count = ?, failure_count = ?, skipped_count = ?,
+            error_summary = ?, metadata = ?, finished_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            str(status or "").strip(),
+            int(success_count or 0),
+            int(failure_count or 0),
+            int(skipped_count or 0),
+            sanitize_error(error_summary),
+            _json_text(metadata or {}),
+            int(run_log_id),
+        ),
+    )
+    db.commit()
+    return dict(db.execute("SELECT * FROM run_logs WHERE id = ?", (int(run_log_id),)).fetchone())
+
+
+def record_run_usage(
+    db: sqlite3.Connection,
+    run_log_id: int,
+    *,
+    provider: str,
+    event_type: str,
+    status: str,
+    cost_units: float,
+    message: str,
+) -> dict:
+    db.execute(
+        """
+        INSERT INTO run_usage_events
+          (run_log_id, provider, event_type, status, cost_units, message)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(run_log_id),
+            provider,
+            event_type,
+            status,
+            float(cost_units),
+            sanitize_error(message),
+        ),
+    )
+    db.commit()
+    return dict(db.execute("SELECT * FROM run_usage_events WHERE id = last_insert_rowid()").fetchone())
+
+
+def list_run_logs(db: sqlite3.Connection, run_type: str | None = None, limit: int = 20) -> list[dict]:
+    sql = "SELECT * FROM run_logs"
+    params: list[object] = []
+    if run_type:
+        sql += " WHERE run_type = ?"
+        params.append(str(run_type))
+    sql += " ORDER BY started_at DESC, id DESC LIMIT ?"
+    params.append(int(limit))
+    return [dict(row) for row in db.execute(sql, tuple(params)).fetchall()]
+
+
+def list_run_usage_events(db: sqlite3.Connection, run_log_id: int) -> list[dict]:
+    rows = db.execute(
+        "SELECT * FROM run_usage_events WHERE run_log_id = ? ORDER BY id",
+        (int(run_log_id),),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def run_usage_totals(db: sqlite3.Connection, run_log_id: int | None) -> dict[str, float]:
+    if not run_log_id:
+        return {}
+    totals: dict[str, float] = {}
+    rows = db.execute(
+        """
+        SELECT provider, SUM(cost_units) AS total
+        FROM run_usage_events
+        WHERE run_log_id = ?
+        GROUP BY provider
+        """,
+        (int(run_log_id),),
+    ).fetchall()
+    for row in rows:
+        totals[str(row["provider"])] = float(row["total"] or 0.0)
+    return totals
+
+
+def daily_run_usage(db: sqlite3.Connection, *, providers: list[str] | tuple[str, ...] | None = None) -> dict[str, float]:
+    totals = {provider: 0.0 for provider in (providers or [])}
+    sql = """
+        SELECT provider, SUM(cost_units) AS total
+        FROM run_usage_events
+        WHERE date(created_at) = date('now')
+    """
+    params: list[object] = []
+    if providers:
+        sql += f" AND provider IN ({', '.join('?' for _ in providers)})"
+        params.extend(providers)
+    sql += " GROUP BY provider"
+    rows = db.execute(sql, tuple(params)).fetchall()
+    for row in rows:
+        totals[str(row["provider"])] = float(row["total"] or 0.0)
+    return totals
+
+
 def latest_provider_usage(db: sqlite3.Connection) -> dict:
+    run_logs = list_run_logs(db, limit=1)
+    if run_logs:
+        run_log = run_logs[0]
+        usage = {"Serper": 0.0, "Hunter.io": 0.0, "Apollo.io": 0.0}
+        usage.update(run_usage_totals(db, run_log["id"]))
+        return {"run": run_log, "usage": usage}
     run = db.execute(
         "SELECT * FROM campaign_runs ORDER BY started_at DESC, id DESC LIMIT 1"
     ).fetchone()

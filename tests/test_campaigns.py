@@ -10,12 +10,17 @@ from leadfinder.config import settings
 from leadfinder.db import (
     connect,
     create_campaign_run,
+    create_run_log,
     create_or_skip_lead,
+    finish_run_log,
     finish_campaign_run,
     list_campaign_runs,
     list_leads,
     list_provider_events,
+    list_run_logs,
+    list_run_usage_events,
     record_provider_event,
+    record_run_usage,
 )
 from leadfinder.campaigns import CampaignOptions, _enrich_optional, run_campaign
 
@@ -71,6 +76,23 @@ class CampaignSettingsTests(unittest.TestCase):
         self.assertEqual(cfg.comtrade_api_key, "primary-key")
         self.assertEqual(cfg.comtrade_api_key_secondary, "secondary-key")
 
+    def test_settings_loads_provider_budgets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text(
+                "LEADFINDER_SERPER_RUN_LIMIT=5\n"
+                "LEADFINDER_SERPER_DAILY_LIMIT=20\n"
+                "LEADFINDER_APOLLO_RUN_LIMIT=3\n"
+                "LEADFINDER_HUNTER_DAILY_LIMIT=15\n",
+                encoding="utf-8",
+            )
+            cfg = settings(env_path)
+
+        self.assertEqual(cfg.serper_run_limit, 5.0)
+        self.assertEqual(cfg.serper_daily_limit, 20.0)
+        self.assertEqual(cfg.apollo_run_limit, 3.0)
+        self.assertEqual(cfg.hunter_daily_limit, 15.0)
+
 
 class CampaignDbTests(unittest.TestCase):
     def test_campaign_run_and_provider_events_are_recorded(self) -> None:
@@ -119,6 +141,41 @@ class CampaignDbTests(unittest.TestCase):
         self.assertEqual(json.loads(runs[0]["quality_after"])["total"], 3)
         self.assertEqual(events[0]["provider"], "Serper")
         self.assertEqual(events[0]["cost_units"], 1)
+
+    def test_run_logs_and_usage_events_are_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                run_log = create_run_log(db, "campaign", trigger_source="test", related_run_id=7, metadata={"hs": "7019"})
+                record_run_usage(
+                    db,
+                    run_log["id"],
+                    provider="Serper",
+                    event_type="search",
+                    status="ok",
+                    cost_units=2,
+                    message="demo",
+                )
+                finish_run_log(
+                    db,
+                    run_log["id"],
+                    status="Completed",
+                    success_count=3,
+                    failure_count=1,
+                    skipped_count=2,
+                    error_summary="sanitized",
+                    metadata={"done": True},
+                )
+                logs = list_run_logs(db, "campaign")
+                usage_events = list_run_usage_events(db, run_log["id"])
+            finally:
+                db.close()
+
+        self.assertEqual(logs[0]["related_run_id"], 7)
+        self.assertEqual(logs[0]["status"], "Completed")
+        self.assertEqual(logs[0]["success_count"], 3)
+        self.assertEqual(usage_events[0]["provider"], "Serper")
+        self.assertEqual(usage_events[0]["cost_units"], 2)
 
     def test_list_leads_preserves_legacy_positional_limit_and_offset(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -793,6 +850,37 @@ class CampaignRunnerTests(unittest.TestCase):
         self.assertIn("glasfaser", message["query"].lower())
         self.assertTrue(message["error"])
         self.assertLess(len(serper_event["message"]), 1000)
+
+    def test_campaign_stops_when_serper_run_budget_is_reached(self) -> None:
+        client = RecordingSerperClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                result = run_campaign(
+                    db,
+                    CampaignOptions(
+                        hs_code="701912",
+                        product="all",
+                        target_countries=("Germany",),
+                        per_market_limit=4,
+                        use_serper=True,
+                    ),
+                    serper_client=client,
+                    budget_limits={"Serper": {"run_limit": 2}},
+                )
+                events = list_provider_events(db, result["run_id"])
+                run_logs = list_run_logs(db, "campaign")
+                usage_events = list_run_usage_events(db, result["run_log_id"])
+            finally:
+                db.close()
+
+        self.assertEqual(len(client.queries), 2)
+        self.assertTrue(result["budget_stops"])
+        self.assertEqual(result["budget_stops"][0]["provider"], "Serper")
+        self.assertTrue(any(event["provider"] == "Serper" and event["status"] == "budget_stop" for event in events))
+        self.assertEqual(run_logs[0]["status"], "Completed")
+        self.assertEqual(run_logs[0]["related_run_id"], result["run_id"])
+        self.assertTrue(any(event["provider"] == "Serper" and event["cost_units"] == 1.0 for event in usage_events))
 
     def test_campaign_keeps_query_budget_independent_per_country(self) -> None:
         client = RecordingSerperClient()

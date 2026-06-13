@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 
 from leadfinder.contact_enrichment import enrich_qualified_emails, verify_existing_qualified_emails
-from leadfinder.db import connect, create_or_skip_lead, list_leads
+from leadfinder.db import connect, create_or_skip_lead, create_run_log, list_leads, run_usage_totals
+from leadfinder.stability import BudgetManager
 
 
 class FakeHunter:
@@ -303,6 +304,64 @@ class ContactEnrichmentTests(unittest.TestCase):
         self.assertEqual(hunter.verify_calls, 1)
         self.assertEqual(rows["Eligible Buyer"]["email_verification_status"], "valid")
         self.assertEqual(rows["Supplier"]["email_verification_status"], "")
+
+    def test_enrich_stops_when_hunter_budget_is_reached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Qualified Buyer",
+                        "website": "https://buyer.example",
+                        "status": "Qualified",
+                        "match_score": 75,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
+                    },
+                )
+                run_log = create_run_log(db, "enrich_qualified")
+                budget_manager = BudgetManager(db, run_log["id"], {"Hunter.io": {"run_limit": 1}})
+                result = enrich_qualified_emails(db, FakeHunter(), limit=5, budget_manager=budget_manager)
+                lead = list_leads(db)[0]
+                usage = run_usage_totals(db, run_log["id"])
+            finally:
+                db.close()
+
+        self.assertEqual(result["attempted"], 1)
+        self.assertTrue(result["budget_stops"])
+        self.assertEqual(lead["email"], "sales@buyer.example")
+        self.assertEqual(lead["email_verification_status"], "budget_stopped")
+        self.assertEqual(usage["Hunter.io"], 1.0)
+
+    def test_verify_stops_when_hunter_budget_is_reached(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Qualified Buyer",
+                        "website": "https://buyer.example",
+                        "email": "sales@buyer.example",
+                        "status": "Qualified",
+                        "match_score": 75,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
+                    },
+                )
+                run_log = create_run_log(db, "verify_qualified_emails")
+                budget_manager = BudgetManager(db, run_log["id"], {"Hunter.io": {"run_limit": 0.5}})
+                result = verify_existing_qualified_emails(db, FakeHunter(), limit=5, budget_manager=budget_manager)
+                lead = list_leads(db)[0]
+            finally:
+                db.close()
+
+        self.assertEqual(result["attempted"], 0)
+        self.assertTrue(result["budget_stops"])
+        self.assertEqual(lead["email_verification_status"], "")
 
 
 if __name__ == "__main__":

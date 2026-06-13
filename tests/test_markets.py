@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import unittest
 import urllib.error
 from unittest.mock import patch
@@ -75,6 +76,22 @@ class MarketsTests(unittest.TestCase):
                 os.environ["COMTRADE_API_KEY_SECONDARY"] = original_secondary
 
         self.assertEqual(seen_keys, ["primary-key", "secondary-key"])
+        self.assertEqual(markets[0]["country_region"], "USA")
+
+    def test_fetch_comtrade_markets_retries_transient_urlerror_once(self) -> None:
+        payload = {"data": [{"reporterDesc": "USA", "primaryValue": 50}]}
+        calls = {"count": 0}
+
+        def fake_urlopen(request, timeout=12.0):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise urllib.error.URLError(socket.gaierror("temporary failure"))
+            return FakeResponse(payload)
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            markets = fetch_comtrade_markets("701919", 2024)
+
+        self.assertEqual(calls["count"], 2)
         self.assertEqual(markets[0]["country_region"], "USA")
 
 

@@ -20,6 +20,7 @@ from leadfinder.quality import quality_report
 from leadfinder.recall import recall_report
 from leadfinder.scoring import score_lead
 from leadfinder.serper import SerperClient, build_queries, results_to_leads
+from leadfinder.stability import budget_limits_from_settings
 from leadfinder.webapp import serve
 
 
@@ -241,6 +242,7 @@ def cmd_campaign(args: argparse.Namespace) -> int:
             serper_client=SerperClient(cfg.serper_api_key, timeout=cfg.timeout_seconds) if use_serper else None,
             apollo_client=ApolloClient(cfg.apollo_api_key, timeout=cfg.timeout_seconds) if use_apollo else None,
             hunter_client=HunterClient(cfg.hunter_api_key, timeout=cfg.timeout_seconds) if use_hunter else None,
+            budget_limits=budget_limits_from_settings(cfg),
         )
     finally:
         db.close()

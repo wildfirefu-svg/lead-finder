@@ -9,10 +9,13 @@ from unittest.mock import patch
 from leadfinder.db import (
     connect,
     create_campaign_run,
+    create_run_log,
     create_or_skip_lead,
     finish_campaign_run,
     list_leads,
+    list_run_logs,
     record_provider_event,
+    record_run_usage,
 )
 from leadfinder.webapp import make_app
 
@@ -587,6 +590,40 @@ class WebAppTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body.decode("utf-8"))["usage"]["Serper"], 2.0)
+
+    def test_api_usage_returns_daily_usage_and_budget_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "leadfinder.sqlite"
+            db = connect(db_path)
+            try:
+                run_log = create_run_log(db, "campaign", trigger_source="test")
+                record_run_usage(
+                    db,
+                    run_log["id"],
+                    provider="Serper",
+                    event_type="search",
+                    status="ok",
+                    cost_units=2,
+                    message="demo",
+                )
+            finally:
+                db.close()
+
+            app = make_app(db_path)
+            with patch("leadfinder.webapp.settings") as mocked_settings:
+                mocked_settings.return_value.serper_run_limit = 5.0
+                mocked_settings.return_value.serper_daily_limit = 20.0
+                mocked_settings.return_value.apollo_run_limit = 0.0
+                mocked_settings.return_value.apollo_daily_limit = 0.0
+                mocked_settings.return_value.hunter_run_limit = 0.0
+                mocked_settings.return_value.hunter_daily_limit = 0.0
+                status, _, body = app.handle("GET", "/api/usage", b"")
+
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["usage"]["Serper"], 2.0)
+        self.assertEqual(payload["daily_usage"]["Serper"], 2.0)
+        self.assertEqual(payload["budgets"]["Serper"]["daily_limit"], 20.0)
 
     def test_api_recall_report_returns_rows(self) -> None:
         db = connect(self.db_path)

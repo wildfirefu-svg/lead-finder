@@ -8,7 +8,7 @@ from .scoring import score_lead
 from .security import sanitize_error
 
 
-def enrich_qualified_emails(db, hunter_client, *, limit: int = 5) -> dict:
+def enrich_qualified_emails(db, hunter_client, *, limit: int = 5, budget_manager=None) -> dict:
     candidates = [
         lead
         for lead in list_leads(db, status="Qualified")
@@ -23,13 +23,19 @@ def enrich_qualified_emails(db, hunter_client, *, limit: int = 5) -> dict:
         "verified": 0,
         "no_email": 0,
         "errors": 0,
+        "budget_stops": [],
     }
 
     for lead in candidates:
+        stop = _check_hunter_budget(budget_manager, 1.0)
+        if stop is not None:
+            summary["budget_stops"].append(stop)
+            break
         summary["attempted"] += 1
         domain = normalize_domain(lead.get("website", ""))
         try:
             search_payload = hunter_client.domain_search(domain)
+            _record_hunter_usage(budget_manager, "domain_search", 1.0, domain)
             email_result = hunter_domain_to_email(search_payload)
             email = email_result.get("email", "")
             notes = _append_note(lead.get("notes", ""), email_result.get("notes", ""))
@@ -46,7 +52,22 @@ def enrich_qualified_emails(db, hunter_client, *, limit: int = 5) -> dict:
                 continue
 
             summary["emails_found"] += 1
+            stop = _check_hunter_budget(budget_manager, 1.0)
+            if stop is not None:
+                summary["budget_stops"].append(stop)
+                update_lead(
+                    db,
+                    lead["id"],
+                    {
+                        "email": email,
+                        "notes": _append_note(notes, stop["message"]),
+                        "email_verification_status": "budget_stopped",
+                        **score_lead({**lead, "email": email, "notes": _append_note(notes, stop["message"])}),
+                    },
+                )
+                break
             verify_payload = hunter_client.verify_email(email)
+            _record_hunter_usage(budget_manager, "verify_email", 1.0, email)
             verification = hunter_verification_note(verify_payload)
             notes = _append_note(notes, verification)
             verification_status = str((verify_payload.get("data") or {}).get("status") or "").lower()
@@ -70,7 +91,7 @@ def enrich_qualified_emails(db, hunter_client, *, limit: int = 5) -> dict:
     return summary
 
 
-def verify_existing_qualified_emails(db, hunter_client, *, limit: int = 10) -> dict:
+def verify_existing_qualified_emails(db, hunter_client, *, limit: int = 10, budget_manager=None) -> dict:
     candidates = [
         lead
         for lead in list_leads(db, status="Qualified")
@@ -85,12 +106,18 @@ def verify_existing_qualified_emails(db, hunter_client, *, limit: int = 10) -> d
         "invalid": 0,
         "other": 0,
         "errors": 0,
+        "budget_stops": [],
     }
 
     for lead in candidates:
+        stop = _check_hunter_budget(budget_manager, 1.0)
+        if stop is not None:
+            summary["budget_stops"].append(stop)
+            break
         summary["attempted"] += 1
         try:
             payload = hunter_client.verify_email(lead["email"])
+            _record_hunter_usage(budget_manager, "verify_email", 1.0, lead["email"])
             verification_status = str((payload.get("data") or {}).get("status") or "").lower()
             notes = _append_note(lead.get("notes", ""), hunter_verification_note(payload))
             update_lead(
@@ -119,3 +146,21 @@ def verify_existing_qualified_emails(db, hunter_client, *, limit: int = 10) -> d
 
 def _append_note(existing: str, note: str) -> str:
     return "\n".join(part for part in [str(existing or "").strip(), str(note or "").strip()] if part)
+
+
+def _check_hunter_budget(budget_manager, cost_units: float) -> dict | None:
+    if budget_manager is None:
+        return None
+    return budget_manager.check("Hunter.io", cost_units)
+
+
+def _record_hunter_usage(budget_manager, event_type: str, cost_units: float, message: str) -> None:
+    if budget_manager is None:
+        return
+    budget_manager.record(
+        "Hunter.io",
+        event_type,
+        "ok",
+        cost_units,
+        message,
+    )

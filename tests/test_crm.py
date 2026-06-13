@@ -3,14 +3,16 @@ from __future__ import annotations
 import io
 import json
 import os
+import socket
 import tempfile
 import unittest
+import urllib.error
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from cli import main
-from leadfinder.crm import infer_crm_outcome, pull_crm_feedback, sync_verified_qualified
+from leadfinder.crm import crm_status, infer_crm_outcome, pull_crm_feedback, sync_verified_qualified
 from leadfinder.db import connect, create_or_skip_lead, list_leads
 from leadfinder.security import sanitize_error
 
@@ -224,6 +226,31 @@ class CrmSyncTests(unittest.TestCase):
         self.assertNotIn("real-secret", message)
         self.assertNotIn("token=abc", message)
         self.assertIn("[redacted]", message)
+
+    def test_crm_status_retries_transient_network_error_once(self) -> None:
+        calls = {"count": 0}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps({"status": {"ok": True}}).encode("utf-8")
+
+        def fake_urlopen(request, timeout=0):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise urllib.error.URLError(socket.gaierror("temporary failure"))
+            return FakeResponse()
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            payload = crm_status("http://127.0.0.1:5173")
+
+        self.assertEqual(calls["count"], 2)
+        self.assertTrue(payload["available"])
 
 
 if __name__ == "__main__":
