@@ -17,8 +17,11 @@ from .db import (
     create_run_log,
     daily_run_usage,
     finish_run_log,
+    list_provider_tasks,
+    list_provider_tasks_by_ids,
     latest_provider_usage,
     list_leads,
+    mark_provider_task_ids_for_retry,
     record_run_usage,
     stats,
     update_lead,
@@ -457,6 +460,40 @@ INDEX_HTML = """<!doctype html>
       color: var(--muted);
       font-size: 12px;
     }
+    .panel-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .panel-controls select,
+    .panel-controls button {
+      min-height: 30px;
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+    .panel-status {
+      color: var(--muted);
+      font-size: 12px;
+      margin-left: auto;
+    }
+    .task-key {
+      max-width: 240px;
+      color: var(--muted);
+      word-break: break-all;
+      font-size: 12px;
+    }
+    .task-message {
+      max-width: 320px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .task-checkbox {
+      width: 32px;
+    }
     .empty {
       padding: 36px 12px;
       text-align: left;
@@ -601,6 +638,44 @@ __PRODUCT_FAMILY_OPTIONS__
       <span>Apollo <b id="usage-apollo">0</b></span>
       <span id="crm-state">CRM 未连接</span>
     </section>
+    <section class="campaign" aria-label="失败任务与重跑标记">
+      <h2 style="margin:0 0 10px;font-size:16px;">失败任务 / 标记重跑</h2>
+      <div class="panel-controls">
+        <select id="provider-task-provider" aria-label="任务来源">
+          <option value="">全部来源</option>
+          <option value="Serper">Serper</option>
+          <option value="Apollo.io">Apollo</option>
+          <option value="Hunter.io">Hunter</option>
+        </select>
+        <select id="provider-task-scope" aria-label="任务范围">
+          <option value="failed">仅看失败/中断</option>
+          <option value="marked">仅看已标记重跑</option>
+          <option value="all">全部任务</option>
+        </select>
+        <button id="provider-task-refresh" type="button">查看失败任务</button>
+        <button id="provider-task-mark-retry" class="action-button" type="button">标记重跑</button>
+        <span id="provider-task-status" class="panel-status">正在加载失败任务...</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="task-checkbox"><input id="provider-task-select-all" type="checkbox" aria-label="全选失败任务"></th>
+              <th>来源</th>
+              <th>任务</th>
+              <th>线索</th>
+              <th>状态</th>
+              <th>重跑标记</th>
+              <th>次数</th>
+              <th>任务键</th>
+              <th>最后结果</th>
+              <th>更新时间</th>
+            </tr>
+          </thead>
+          <tbody id="provider-task-report"><tr><td class="empty" colspan="10">正在加载失败任务...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
     <section class="campaign" aria-label="召回质量报告">
       <h2 style="margin:0 0 10px;font-size:16px;">召回质量报告</h2>
       <div class="table-wrap">
@@ -735,6 +810,7 @@ __PRODUCT_FAMILY_OPTIONS__
     const selectedRegions = new Set(['北美']);
     const selectedCountries = new Set(regionMarkets['北美'].map(([value]) => value));
     const state = {review: '', offset: 0, limit: 200};
+    const selectedProviderTaskIds = new Set();
     let currentResultLength = 0;
 
     function esc(value) {
@@ -760,6 +836,8 @@ __PRODUCT_FAMILY_OPTIONS__
     function stateLabel(value) {
       const labels = {
         success: '成功', partial: '部分成功', error: '失败',
+        running: '中断/未完成', completed: '已完成',
+        budget_stop: '额度停止', deduped: '去重跳过', retry_required: '待标记重跑',
         downstream_customer: '下游客户', distributor_or_importer: '经销/进口商',
         supplier: '供应商', noise: '噪声', unknown: '待判断',
         passed: '通过', failed: '不通过',
@@ -788,6 +866,7 @@ __PRODUCT_FAMILY_OPTIONS__
       'verify-qualified',
       'sync-crm',
       'pull-crm-feedback',
+      'provider-task-mark-retry',
     ];
 
     function setActionButtonState(buttonId, runState) {
@@ -823,6 +902,66 @@ __PRODUCT_FAMILY_OPTIONS__
         eyebrow,
         title: '执行失败',
         lines: ['这一步没有跑完。', detail],
+      };
+    }
+
+    function formatProviderTaskRetrySummary(result) {
+      if (!result || typeof result !== 'object') {
+        return {
+          tone: 'success',
+          eyebrow: '标记重跑',
+          title: '已完成',
+          lines: ['失败任务已更新。'],
+        };
+      }
+      const marked = Number(result.marked || 0);
+      const eligible = Number(result.eligible || 0);
+      const alreadyMarked = Number(result.already_marked || 0);
+      const notEligible = Number(result.not_eligible || 0);
+      const selected = Number(result.selected || 0);
+      if (!selected) {
+        return {
+          tone: 'warn',
+          eyebrow: '标记重跑',
+          title: '没有选中任务',
+          lines: ['请先勾选要重跑的失败任务。'],
+        };
+      }
+      if (!marked) {
+        return {
+          tone: 'warn',
+          eyebrow: '标记重跑',
+          title: '没有可标记任务',
+          lines: [
+            alreadyMarked > 0
+              ? `选中的任务里，有 ${alreadyMarked} 个本来就已经标记过重跑。`
+              : '选中的任务里，没有处于失败或中断状态的项目。',
+            notEligible > 0 ? `${notEligible} 个任务当前不需要重跑标记。` : '',
+          ].filter(Boolean),
+          metrics: [
+            {label: '选中', value: selected},
+            {label: '可标记', value: eligible},
+            ...(alreadyMarked ? [{label: '已标记', value: alreadyMarked}] : []),
+            ...(notEligible ? [{label: '不可标记', value: notEligible}] : []),
+          ],
+        };
+      }
+      return {
+        tone: 'success',
+        eyebrow: '标记重跑',
+        title: `已标记 ${marked} 个任务`,
+        lines: [
+          '这些失败或中断任务下次运行时允许重新调用付费 API。',
+          marked < selected ? `本次共选中 ${selected} 个，其中 ${alreadyMarked} 个原本已标记，${notEligible} 个当前不需要重跑标记。`
+            : '本次选中的任务都已完成重跑标记。',
+        ],
+        metrics: [
+          {label: '选中', value: selected},
+          {label: '已标记', value: marked},
+          {label: '可重跑', value: eligible},
+          ...(alreadyMarked ? [{label: '原已标记', value: alreadyMarked}] : []),
+          ...(notEligible ? [{label: '不可标记', value: notEligible}] : []),
+        ],
       };
     }
 
@@ -957,15 +1096,19 @@ __PRODUCT_FAMILY_OPTIONS__
       const withEmail = Number(qualityAfter.with_email || 0);
       const highQuality = Number(qualityAfter.high_quality || 0);
       const highScore = Number(qualityAfter.high_score || 0);
+      const dedupedTasks = Number(result.deduped_tasks || 0);
+      const retryRequiredTasks = Number(result.retry_required_tasks || 0);
       const budgetStops = Array.isArray(result.budget_stops) ? result.budget_stops : [];
       return {
-        tone: errors > 0 || budgetStops.length > 0 ? 'warn' : 'success',
+        tone: errors > 0 || budgetStops.length > 0 || retryRequiredTasks > 0 ? 'warn' : 'success',
         eyebrow: '自动搜寻',
         title: `已完成${runId ? `，任务 #${runId}` : ''}`,
         lines: [
           `本次新增 ${created} 条线索，跳过 ${skipped} 条。`,
           `当前线索池共 ${total} 条，其中高分 ${highScore} 条、有邮箱 ${withEmail} 条、高质量 ${highQuality} 条。`,
           errors > 0 ? `过程中出现 ${errors} 条错误。` : '过程中没有错误。',
+          dedupedTasks > 0 ? `已跳过 ${dedupedTasks} 个已完成的付费任务，避免重复扣费。` : '',
+          retryRequiredTasks > 0 ? `${retryRequiredTasks} 个失败或中断任务需要先标记重跑，当前不会再次调用付费 API。` : '',
           budgetStops.length ? `额度保护已触发：${budgetStops.map((item) => item.message || '').filter(Boolean).join('；')}` : '',
         ].filter(Boolean),
         metrics: [
@@ -973,6 +1116,8 @@ __PRODUCT_FAMILY_OPTIONS__
           {label: '跳过', value: skipped},
           {label: '高分', value: highScore},
           {label: '有邮箱', value: withEmail},
+          ...(dedupedTasks ? [{label: '去重跳过', value: dedupedTasks}] : []),
+          ...(retryRequiredTasks ? [{label: '待重跑', value: retryRequiredTasks}] : []),
           ...(budgetStops.length ? [{label: '额度触发', value: budgetStops.length}] : []),
         ],
       };
@@ -992,29 +1137,37 @@ __PRODUCT_FAMILY_OPTIONS__
       const verified = Number(result.verified || 0);
       const noEmail = Number(result.no_email || 0);
       const errors = Number(result.errors || 0);
+      const dedupedTasks = Number(result.deduped_tasks || 0);
+      const retryRequiredTasks = Number(result.retry_required_tasks || 0);
       const budgetStops = Array.isArray(result.budget_stops) ? result.budget_stops : [];
       if (!attempted && !errors) {
         return {
-          tone: budgetStops.length ? 'warn' : 'success',
+          tone: budgetStops.length || retryRequiredTasks ? 'warn' : 'success',
           eyebrow: '补全邮箱',
-          title: budgetStops.length ? '额度已触发' : '没有符合条件线索',
+          title: budgetStops.length ? '额度已触发' : retryRequiredTasks ? '存在待重跑任务' : '没有符合条件线索',
           lines: [
             '补全邮箱已完成，本次没有符合条件的 Qualified 线索。',
+            dedupedTasks > 0 ? `已跳过 ${dedupedTasks} 个已完成任务。` : '',
+            retryRequiredTasks > 0 ? `${retryRequiredTasks} 个失败任务需要先标记重跑。` : '',
             budgetStops.length ? budgetStops.map((item) => item.message || '').filter(Boolean).join('；') : '',
           ].filter(Boolean),
           metrics: [
             {label: '处理', value: attempted},
             {label: '错误', value: errors},
+            ...(dedupedTasks ? [{label: '去重跳过', value: dedupedTasks}] : []),
+            ...(retryRequiredTasks ? [{label: '待重跑', value: retryRequiredTasks}] : []),
           ],
         };
       }
       return {
-        tone: errors > 0 || budgetStops.length ? 'warn' : 'success',
+        tone: errors > 0 || budgetStops.length || retryRequiredTasks ? 'warn' : 'success',
         eyebrow: '补全邮箱',
         title: `已完成，共处理 ${attempted} 条`,
         lines: [
           `找到邮箱 ${emailsFound} 条，其中验证通过 ${verified} 条，未找到邮箱 ${noEmail} 条。`,
           errors > 0 ? `处理错误 ${errors} 条。` : '没有处理错误。',
+          dedupedTasks > 0 ? `已跳过 ${dedupedTasks} 个已完成任务，避免重复扣费。` : '',
+          retryRequiredTasks > 0 ? `${retryRequiredTasks} 个失败任务需要先标记重跑。` : '',
           budgetStops.length ? `额度保护已触发：${budgetStops.map((item) => item.message || '').filter(Boolean).join('；')}` : '',
         ].filter(Boolean),
         metrics: [
@@ -1022,6 +1175,8 @@ __PRODUCT_FAMILY_OPTIONS__
           {label: '找到邮箱', value: emailsFound},
           {label: '验证通过', value: verified},
           {label: '未找到', value: noEmail},
+          ...(dedupedTasks ? [{label: '去重跳过', value: dedupedTasks}] : []),
+          ...(retryRequiredTasks ? [{label: '待重跑', value: retryRequiredTasks}] : []),
           ...(budgetStops.length ? [{label: '额度触发', value: budgetStops.length}] : []),
         ],
       };
@@ -1041,29 +1196,37 @@ __PRODUCT_FAMILY_OPTIONS__
       const invalid = Number(result.invalid || 0);
       const other = Number(result.other || 0);
       const errors = Number(result.errors || 0);
+      const dedupedTasks = Number(result.deduped_tasks || 0);
+      const retryRequiredTasks = Number(result.retry_required_tasks || 0);
       const budgetStops = Array.isArray(result.budget_stops) ? result.budget_stops : [];
       if (!attempted && !errors) {
         return {
-          tone: budgetStops.length ? 'warn' : 'success',
+          tone: budgetStops.length || retryRequiredTasks ? 'warn' : 'success',
           eyebrow: '验证邮箱',
-          title: budgetStops.length ? '额度已触发' : '没有待验证邮箱',
+          title: budgetStops.length ? '额度已触发' : retryRequiredTasks ? '存在待重跑任务' : '没有待验证邮箱',
           lines: [
             '邮箱验证已完成，本次没有需要验证的 Qualified 邮箱。',
+            dedupedTasks > 0 ? `已跳过 ${dedupedTasks} 个已完成任务。` : '',
+            retryRequiredTasks > 0 ? `${retryRequiredTasks} 个失败任务需要先标记重跑。` : '',
             budgetStops.length ? budgetStops.map((item) => item.message || '').filter(Boolean).join('；') : '',
           ].filter(Boolean),
           metrics: [
             {label: '验证', value: attempted},
             {label: '错误', value: errors},
+            ...(dedupedTasks ? [{label: '去重跳过', value: dedupedTasks}] : []),
+            ...(retryRequiredTasks ? [{label: '待重跑', value: retryRequiredTasks}] : []),
           ],
         };
       }
       return {
-        tone: errors > 0 || budgetStops.length ? 'warn' : 'success',
+        tone: errors > 0 || budgetStops.length || retryRequiredTasks ? 'warn' : 'success',
         eyebrow: '验证邮箱',
         title: `已完成，共验证 ${attempted} 条`,
         lines: [
           `有效 ${valid} 条，无效 ${invalid} 条，其它结果 ${other} 条。`,
           errors > 0 ? `验证错误 ${errors} 条。` : '没有验证错误。',
+          dedupedTasks > 0 ? `已跳过 ${dedupedTasks} 个已完成任务，避免重复扣费。` : '',
+          retryRequiredTasks > 0 ? `${retryRequiredTasks} 个失败任务需要先标记重跑。` : '',
           budgetStops.length ? `额度保护已触发：${budgetStops.map((item) => item.message || '').filter(Boolean).join('；')}` : '',
         ].filter(Boolean),
         metrics: [
@@ -1071,6 +1234,8 @@ __PRODUCT_FAMILY_OPTIONS__
           {label: '有效', value: valid},
           {label: '无效', value: invalid},
           {label: '其它', value: other},
+          ...(dedupedTasks ? [{label: '去重跳过', value: dedupedTasks}] : []),
+          ...(retryRequiredTasks ? [{label: '待重跑', value: retryRequiredTasks}] : []),
           ...(budgetStops.length ? [{label: '额度触发', value: budgetStops.length}] : []),
         ],
       };
@@ -1118,6 +1283,155 @@ __PRODUCT_FAMILY_OPTIONS__
           {label: '勿联系', value: Number(outcomes.do_not_contact || 0)},
         ],
       };
+    }
+
+    function providerTaskStateLabel(task) {
+      if (!task || typeof task !== 'object') return '—';
+      if (Number(task.retry_requested || 0)) {
+        if (task.retry_marked_at) {
+          return `已标记重跑 · ${task.retry_marked_at}`;
+        }
+        return '已标记重跑';
+      }
+      return stateLabel(task.status || '');
+    }
+
+    function providerTaskSummaryText(rows, scope) {
+      const total = rows.length;
+      if (!total) {
+        if (scope === 'marked') return '当前没有已标记重跑的任务。';
+        if (scope === 'all') return '当前还没有记录到付费任务。';
+        return '当前没有失败或中断的付费任务。';
+      }
+      const marked = rows.filter((row) => Number(row.retry_requested || 0)).length;
+      const failed = rows.filter((row) => String(row.status || '').toLowerCase() === 'error').length;
+      const running = rows.filter((row) => String(row.status || '').toLowerCase() === 'running').length;
+      return `共 ${total} 条，其中失败 ${failed} 条，中断 ${running} 条，已标记重跑 ${marked} 条。`;
+    }
+
+    function updateProviderTaskStatus(text) {
+      const element = document.getElementById('provider-task-status');
+      if (element) element.textContent = text;
+    }
+
+    function syncProviderTaskSelectAll() {
+      const rows = Array.from(document.querySelectorAll('input[data-provider-task-id]'));
+      const selectAll = document.getElementById('provider-task-select-all');
+      if (!selectAll) return;
+      if (!rows.length) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+        return;
+      }
+      const selectedCount = rows.filter((input) => input.checked).length;
+      selectAll.checked = selectedCount === rows.length;
+      selectAll.indeterminate = selectedCount > 0 && selectedCount < rows.length;
+    }
+
+    function onProviderTaskSelectionChange(event) {
+      const input = event.target;
+      const taskId = Number(input.getAttribute('data-provider-task-id') || 0);
+      if (!taskId) return;
+      if (input.checked) {
+        selectedProviderTaskIds.add(taskId);
+      } else {
+        selectedProviderTaskIds.delete(taskId);
+      }
+      syncProviderTaskSelectAll();
+    }
+
+    function onProviderTaskSelectAllChange(event) {
+      const checked = Boolean(event.target.checked);
+      document.querySelectorAll('input[data-provider-task-id]').forEach((input) => {
+        const taskId = Number(input.getAttribute('data-provider-task-id') || 0);
+        input.checked = checked;
+        if (!taskId) return;
+        if (checked) {
+          selectedProviderTaskIds.add(taskId);
+        } else {
+          selectedProviderTaskIds.delete(taskId);
+        }
+      });
+      syncProviderTaskSelectAll();
+    }
+
+    async function loadProviderTasks() {
+      const provider = document.getElementById('provider-task-provider').value;
+      const scope = document.getElementById('provider-task-scope').value;
+      updateProviderTaskStatus('正在刷新失败任务...');
+      const params = new URLSearchParams({limit: '100', scope});
+      if (provider) params.set('provider', provider);
+      const response = await fetch(`/api/provider-tasks?${params.toString()}`);
+      const payload = await response.json();
+      const rows = Array.isArray(payload.tasks) ? payload.tasks : [];
+      const tbody = document.getElementById('provider-task-report');
+      const nextSelection = new Set();
+      if (!rows.length) {
+        selectedProviderTaskIds.clear();
+        tbody.innerHTML = '<tr><td class="empty" colspan="10">当前没有可显示的失败任务。</td></tr>';
+        syncProviderTaskSelectAll();
+        updateProviderTaskStatus(providerTaskSummaryText(rows, scope));
+        return;
+      }
+      tbody.innerHTML = rows.map((task) => {
+        const taskId = Number(task.id || 0);
+        const isSelected = selectedProviderTaskIds.has(taskId);
+        if (isSelected) nextSelection.add(taskId);
+        const lastResult = task.last_error || task.last_message || '';
+        return `
+          <tr>
+            <td class="task-checkbox"><input type="checkbox" data-provider-task-id="${taskId}" ${isSelected ? 'checked' : ''} aria-label="选择任务 ${taskId}"></td>
+            <td>${esc(task.provider)}</td>
+            <td>${esc(task.task_type)}</td>
+            <td>${task.lead_id ? `#${task.lead_id}` : '—'}</td>
+            <td class="state">${esc(stateLabel(task.status))}</td>
+            <td class="state">${esc(providerTaskStateLabel(task))}</td>
+            <td>${Number(task.attempts || 0)}</td>
+            <td class="task-key">${esc(task.task_key)}</td>
+            <td class="task-message">${esc(lastResult || '—')}</td>
+            <td class="state">${esc(task.updated_at || '')}</td>
+          </tr>
+        `;
+      }).join('');
+      selectedProviderTaskIds.clear();
+      nextSelection.forEach((taskId) => selectedProviderTaskIds.add(taskId));
+      tbody.querySelectorAll('input[data-provider-task-id]').forEach((input) => {
+        input.addEventListener('change', onProviderTaskSelectionChange);
+      });
+      syncProviderTaskSelectAll();
+      updateProviderTaskStatus(providerTaskSummaryText(rows, scope));
+    }
+
+    async function markSelectedProviderTasksRetry() {
+      const button = document.getElementById('provider-task-mark-retry');
+      const taskIds = Array.from(selectedProviderTaskIds);
+      clearActionButtonStates(button.id);
+      if (!taskIds.length) {
+        renderActionSummary(button.id, formatProviderTaskRetrySummary({selected: 0, marked: 0, eligible: 0}));
+        return;
+      }
+      button.disabled = true;
+      setActionButtonState(button.id, 'working');
+      renderSummaryCard({
+        tone: 'working',
+        eyebrow: '标记重跑',
+        title: '正在更新',
+        lines: ['正在给选中的失败任务加上重跑标记...'],
+      });
+      try {
+        const response = await fetch('/api/mark-provider-retry', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({task_ids: taskIds})
+        });
+        const payload = await response.json();
+        renderActionSummary(button.id, formatProviderTaskRetrySummary(payload.result || payload));
+        await loadProviderTasks();
+      } catch (error) {
+        renderActionSummary(button.id, formatActionError('标记重跑', error));
+      } finally {
+        button.disabled = false;
+      }
     }
 
     function productFamilyLabel(value) {
@@ -1396,6 +1710,7 @@ __PRODUCT_FAMILY_OPTIONS__
         await loadLeads();
         await loadRecallReport(payload.result ? payload.result.run_id : '');
         await loadUsage();
+        await loadProviderTasks();
       } catch (error) {
         renderActionSummary(button.id, formatActionError('自动搜寻', error));
       } finally {
@@ -1423,6 +1738,7 @@ __PRODUCT_FAMILY_OPTIONS__
         const payload = await response.json();
         renderActionSummary(button.id, formatRequalifySummary(payload.result || payload));
         await loadLeads();
+        await loadProviderTasks();
       } catch (error) {
         renderActionSummary(button.id, formatActionError('批量复核', error));
       } finally {
@@ -1450,6 +1766,7 @@ __PRODUCT_FAMILY_OPTIONS__
         const payload = await response.json();
         renderActionSummary(button.id, formatEnrichSummary(payload.result || payload));
         await loadLeads();
+        await loadProviderTasks();
       } catch (error) {
         renderActionSummary(button.id, formatActionError('补全邮箱', error));
       } finally {
@@ -1477,6 +1794,7 @@ __PRODUCT_FAMILY_OPTIONS__
         const payload = await response.json();
         renderActionSummary(button.id, formatVerifySummary(payload.result || payload));
         await loadLeads();
+        await loadProviderTasks();
       } catch (error) {
         renderActionSummary(button.id, formatActionError('验证邮箱', error));
       } finally {
@@ -1565,6 +1883,11 @@ __PRODUCT_FAMILY_OPTIONS__
     document.getElementById('export-qualified').addEventListener('click', () => {
       window.location.href = '/api/export-qualified';
     });
+    document.getElementById('provider-task-refresh').addEventListener('click', loadProviderTasks);
+    document.getElementById('provider-task-provider').addEventListener('change', loadProviderTasks);
+    document.getElementById('provider-task-scope').addEventListener('change', loadProviderTasks);
+    document.getElementById('provider-task-select-all').addEventListener('change', onProviderTaskSelectAllChange);
+    document.getElementById('provider-task-mark-retry').addEventListener('click', markSelectedProviderTasksRetry);
     document.getElementById('sync-crm').addEventListener('click', syncCrm);
     document.getElementById('pull-crm-feedback').addEventListener('click', pullCrmFeedback);
     renderMarketPicker();
@@ -1572,6 +1895,7 @@ __PRODUCT_FAMILY_OPTIONS__
     renderSummaryCard();
     loadProviderState();
     loadUsage();
+    loadProviderTasks();
     loadRecallReport();
     loadCrmFeedbackReport();
     loadCrmState();
@@ -1703,6 +2027,31 @@ class LocalLeadApp:
             finally:
                 db.close()
             return self.json_response(payload)
+
+        if method == "GET" and parsed.path == "/api/provider-tasks":
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            provider = str(query.get("provider", [""])[0] or "").strip() or None
+            scope = str(query.get("scope", ["failed"])[0] or "failed").strip().lower()
+            limit_text = query.get("limit", ["50"])[0]
+            try:
+                limit = max(1, min(int(limit_text or 50), 200))
+            except (TypeError, ValueError):
+                return self.json_response({"error": "invalid limit"}, status=400)
+            if scope not in {"failed", "marked", "all"}:
+                return self.json_response({"error": "invalid scope"}, status=400)
+            db = connect(self.db_path)
+            try:
+                rows = list_provider_tasks(db, provider=provider, limit=limit)
+                if scope == "failed":
+                    rows = [
+                        row for row in rows
+                        if str(row.get("status") or "").lower() in {"error", "running"}
+                    ]
+                elif scope == "marked":
+                    rows = [row for row in rows if int(row.get("retry_requested") or 0)]
+            finally:
+                db.close()
+            return self.json_response({"tasks": rows, "scope": scope})
 
         if method == "GET" and parsed.path == "/api/recall-report":
             query = parse_qs(parsed.query, keep_blank_values=True)
@@ -1868,6 +2217,59 @@ class LocalLeadApp:
                     result=result,
                     error_summary="; ".join(item.get("message", "") for item in result.get("budget_stops", []) if item.get("message")),
                 )
+            finally:
+                db.close()
+            return self.json_response({"result": result})
+
+        if method == "POST" and parsed.path == "/api/mark-provider-retry":
+            payload = json.loads(body.decode("utf-8") or "{}")
+            raw_task_ids = payload.get("task_ids", [])
+            if not isinstance(raw_task_ids, list):
+                return self.json_response({"error": "task_ids must be a list"}, status=400)
+            task_ids: list[int] = []
+            for item in raw_task_ids:
+                try:
+                    task_id = int(item)
+                except (TypeError, ValueError):
+                    return self.json_response({"error": "invalid task id"}, status=400)
+                if task_id > 0:
+                    task_ids.append(task_id)
+            db = connect(self.db_path)
+            try:
+                run_log = _start_action_log(
+                    db,
+                    "mark_provider_retry",
+                    {"selected": len(task_ids), "task_ids": task_ids},
+                )
+                tracked_rows = list_provider_tasks_by_ids(db, task_ids)
+                eligible_ids = {
+                    int(row["id"])
+                    for row in tracked_rows
+                    if str(row.get("status") or "").lower() in {"error", "running"}
+                }
+                already_marked_ids = {
+                    int(row["id"])
+                    for row in tracked_rows
+                    if int(row.get("retry_requested") or 0)
+                }
+                rows = mark_provider_task_ids_for_retry(db, task_ids, marked_by="webapp")
+                marked_ids = {
+                    int(row["id"])
+                    for row in rows
+                    if int(row.get("id") or 0) in eligible_ids
+                    and int(row.get("retry_requested") or 0)
+                    and int(row.get("id") or 0) not in already_marked_ids
+                }
+                result = {
+                    "selected": len(task_ids),
+                    "eligible": len(eligible_ids),
+                    "marked": len(marked_ids),
+                    "already_marked": len(already_marked_ids & eligible_ids),
+                    "not_eligible": max(0, len(task_ids) - len(eligible_ids)),
+                    "tasks": rows,
+                    "errors": 0,
+                }
+                _finish_action_log(db, run_log["id"], status="Completed", result=result)
             finally:
                 db.close()
             return self.json_response({"result": result})

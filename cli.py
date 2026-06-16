@@ -8,7 +8,17 @@ from leadfinder.apollo import ApolloClient
 from leadfinder.campaigns import CampaignOptions, run_campaign
 from leadfinder.config import settings
 from leadfinder.crm import pull_crm_feedback, sync_verified_qualified
-from leadfinder.db import connect, create_or_skip_lead, list_leads, list_markets, stats, update_lead, upsert_market
+from leadfinder.db import (
+    connect,
+    create_or_skip_lead,
+    list_leads,
+    list_markets,
+    list_provider_tasks,
+    mark_provider_tasks_for_retry,
+    stats,
+    update_lead,
+    upsert_market,
+)
 from leadfinder.enrich import enrich_site
 from leadfinder.exporter import export_csv
 from leadfinder.feedback import crm_feedback_report
@@ -260,6 +270,42 @@ def cmd_stats(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_provider_task_report(args: argparse.Namespace) -> int:
+    cfg = settings()
+    db = connect(cfg.db_path)
+    try:
+        rows = list_provider_tasks(
+            db,
+            provider=args.provider,
+            task_type=args.task_type,
+            status=args.status,
+            lead_id=args.lead_id,
+            limit=args.limit,
+        )
+    finally:
+        db.close()
+    print(json.dumps({"tasks": rows}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_mark_provider_retry(args: argparse.Namespace) -> int:
+    cfg = settings()
+    db = connect(cfg.db_path)
+    try:
+        rows = mark_provider_tasks_for_retry(
+            db,
+            provider=args.provider,
+            task_type=args.task_type,
+            lead_id=args.lead_id,
+            task_key=args.task_key,
+            limit=args.limit,
+        )
+    finally:
+        db.close()
+    print(json.dumps({"marked": len(rows), "tasks": rows}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Find fiberglass overseas customer leads.")
     sub = parser.add_subparsers(required=True)
@@ -342,6 +388,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     stats_parser = sub.add_parser("stats", help="Show local database counts.")
     stats_parser.set_defaults(func=cmd_stats)
+
+    provider_task_report = sub.add_parser("provider-task-report", help="Inspect provider task dedupe and retry state.")
+    provider_task_report.add_argument("--provider", default=None)
+    provider_task_report.add_argument("--task-type", default=None)
+    provider_task_report.add_argument("--status", default=None)
+    provider_task_report.add_argument("--lead-id", type=int, default=None)
+    provider_task_report.add_argument("--limit", type=int, default=50)
+    provider_task_report.set_defaults(func=cmd_provider_task_report)
+
+    mark_provider_retry = sub.add_parser("mark-provider-retry", help="Mark failed provider tasks so they may run again.")
+    mark_provider_retry.add_argument("--provider", default=None)
+    mark_provider_retry.add_argument("--task-type", default=None)
+    mark_provider_retry.add_argument("--lead-id", type=int, default=None)
+    mark_provider_retry.add_argument("--task-key", default=None)
+    mark_provider_retry.add_argument("--limit", type=int, default=50)
+    mark_provider_retry.set_defaults(func=cmd_mark_provider_retry)
     return parser
 
 

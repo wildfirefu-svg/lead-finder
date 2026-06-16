@@ -7,12 +7,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from leadfinder.db import (
+    claim_provider_task,
     connect,
     create_campaign_run,
     create_run_log,
     create_or_skip_lead,
+    finish_provider_task,
     finish_campaign_run,
     list_leads,
+    list_provider_tasks_by_ids,
     list_run_logs,
     record_provider_event,
     record_run_usage,
@@ -148,6 +151,166 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("function renderSummaryCard", html)
         self.assertIn('id="campaign-summary"', html)
         self.assertIn("summary-card", html)
+        self.assertIn("失败任务 / 标记重跑", html)
+        self.assertIn('id="provider-task-report"', html)
+        self.assertIn('id="provider-task-mark-retry"', html)
+        self.assertIn("function loadProviderTasks()", html)
+        self.assertIn("function markSelectedProviderTasksRetry()", html)
+
+    def test_api_provider_tasks_lists_failed_rows(self) -> None:
+        db = connect(self.db_path)
+        try:
+            failed_task = claim_provider_task(
+                db,
+                provider="Hunter.io",
+                task_type="verify_email",
+                task_key="lead:5:verify:sales@example.com",
+                lead_id=5,
+            )["task"]
+            finish_provider_task(
+                db,
+                failed_task["id"],
+                status="error",
+                message="Hunter verify failed",
+                error="timeout",
+            )
+            done_task = claim_provider_task(
+                db,
+                provider="Serper",
+                task_type="search",
+                task_key="query:usa:fiberglass",
+            )["task"]
+            finish_provider_task(
+                db,
+                done_task["id"],
+                status="completed",
+                message="done",
+            )
+        finally:
+            db.close()
+
+        status, _, body = make_app(self.db_path).handle("GET", "/api/provider-tasks?scope=failed", b"")
+        payload = json.loads(body.decode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["scope"], "failed")
+        self.assertEqual(len(payload["tasks"]), 1)
+        self.assertEqual(payload["tasks"][0]["provider"], "Hunter.io")
+        self.assertEqual(payload["tasks"][0]["status"], "error")
+
+    def test_api_mark_provider_retry_marks_selected_failed_tasks(self) -> None:
+        db = connect(self.db_path)
+        try:
+            failed_task = claim_provider_task(
+                db,
+                provider="Apollo.io",
+                task_type="contact",
+                task_key="apollo:lead:9",
+                lead_id=9,
+            )["task"]
+            finish_provider_task(
+                db,
+                failed_task["id"],
+                status="error",
+                message="Apollo lookup failed",
+                error="quota",
+            )
+        finally:
+            db.close()
+
+        status, _, body = make_app(self.db_path).handle(
+            "POST",
+            "/api/mark-provider-retry",
+            json.dumps({"task_ids": [failed_task["id"]]}).encode("utf-8"),
+        )
+        payload = json.loads(body.decode("utf-8"))
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["result"]["selected"], 1)
+        self.assertEqual(payload["result"]["eligible"], 1)
+        self.assertEqual(payload["result"]["marked"], 1)
+        self.assertEqual(payload["result"]["already_marked"], 0)
+        self.assertEqual(payload["result"]["not_eligible"], 0)
+        self.assertEqual(payload["result"]["tasks"][0]["retry_requested"], 1)
+        self.assertTrue(payload["result"]["tasks"][0]["retry_marked_at"])
+        self.assertEqual(payload["result"]["tasks"][0]["retry_marked_by"], "webapp")
+
+    def test_api_mark_provider_retry_reports_already_marked_and_completed_rows(self) -> None:
+        db = connect(self.db_path)
+        try:
+            already_marked = claim_provider_task(
+                db,
+                provider="Serper",
+                task_type="search",
+                task_key="query:retry:marked",
+            )["task"]
+            finish_provider_task(
+                db,
+                already_marked["id"],
+                status="error",
+                message="temporary failure",
+                error="temporary failure",
+            )
+            db.execute(
+                """
+                UPDATE provider_tasks
+                SET retry_requested = 1, retry_marked_at = CURRENT_TIMESTAMP, retry_marked_by = 'manual_filter'
+                WHERE id = ?
+                """,
+                (already_marked["id"],),
+            )
+            completed = claim_provider_task(
+                db,
+                provider="Hunter.io",
+                task_type="verify_email",
+                task_key="lead:1|email:done@example.com",
+                lead_id=1,
+            )["task"]
+            finish_provider_task(
+                db,
+                completed["id"],
+                status="completed",
+                message="done@example.com",
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        status, _, body = make_app(self.db_path).handle(
+            "POST",
+            "/api/mark-provider-retry",
+            json.dumps({"task_ids": [already_marked["id"], completed["id"]]}).encode("utf-8"),
+        )
+        payload = json.loads(body.decode("utf-8"))
+        db = connect(self.db_path)
+        try:
+            rows = {
+                row["id"]: row for row in list_provider_tasks_by_ids(
+                    db,
+                    [already_marked["id"], completed["id"]],
+                )
+            }
+        finally:
+            db.close()
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["result"]["selected"], 2)
+        self.assertEqual(payload["result"]["eligible"], 1)
+        self.assertEqual(payload["result"]["marked"], 0)
+        self.assertEqual(payload["result"]["already_marked"], 1)
+        self.assertEqual(payload["result"]["not_eligible"], 1)
+        self.assertEqual(rows[already_marked["id"]]["retry_requested"], 1)
+        self.assertEqual(rows[completed["id"]]["retry_requested"], 0)
+
+    def test_api_mark_provider_retry_rejects_non_list_payload(self) -> None:
+        status, _, body = make_app(self.db_path).handle(
+            "POST",
+            "/api/mark-provider-retry",
+            json.dumps({"task_ids": "bad"}).encode("utf-8"),
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body.decode("utf-8")), {"error": "task_ids must be a list"})
 
     def test_api_leads_supports_review_filter(self) -> None:
         db = connect(self.db_path)

@@ -124,6 +124,28 @@ CREATE TABLE IF NOT EXISTS run_usage_events (
   message TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS provider_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL DEFAULT '',
+  task_type TEXT NOT NULL DEFAULT '',
+  task_key TEXT NOT NULL DEFAULT '',
+  lead_id INTEGER NOT NULL DEFAULT 0,
+  campaign_run_id INTEGER NOT NULL DEFAULT 0,
+  run_log_id INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT '',
+  retry_requested INTEGER NOT NULL DEFAULT 0,
+  retry_marked_at TEXT NOT NULL DEFAULT '',
+  retry_marked_by TEXT NOT NULL DEFAULT '',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  cost_units_total REAL NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  last_message TEXT NOT NULL DEFAULT '',
+  metadata TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (provider, task_type, task_key)
+);
 """
 
 LEAD_FIELDS = [
@@ -178,6 +200,11 @@ LEAD_STATUS_COLUMNS = {
     "product_family": "TEXT NOT NULL DEFAULT ''",
 }
 
+PROVIDER_TASK_STATUS_COLUMNS = {
+    "retry_marked_at": "TEXT NOT NULL DEFAULT ''",
+    "retry_marked_by": "TEXT NOT NULL DEFAULT ''",
+}
+
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path)
@@ -191,6 +218,12 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     for column, definition in LEAD_STATUS_COLUMNS.items():
         if column not in existing_columns:
             db.execute(f"ALTER TABLE leads ADD COLUMN {column} {definition}")
+    existing_provider_task_columns = {
+        row["name"] for row in db.execute("PRAGMA table_info(provider_tasks)").fetchall()
+    }
+    for column, definition in PROVIDER_TASK_STATUS_COLUMNS.items():
+        if column not in existing_provider_task_columns:
+            db.execute(f"ALTER TABLE provider_tasks ADD COLUMN {column} {definition}")
     db.commit()
     return db
 
@@ -405,6 +438,268 @@ def record_run_usage(
     )
     db.commit()
     return dict(db.execute("SELECT * FROM run_usage_events WHERE id = last_insert_rowid()").fetchone())
+
+
+def get_provider_task(
+    db: sqlite3.Connection,
+    *,
+    provider: str,
+    task_type: str,
+    task_key: str,
+) -> dict | None:
+    row = db.execute(
+        """
+        SELECT * FROM provider_tasks
+        WHERE provider = ? AND task_type = ? AND task_key = ?
+        LIMIT 1
+        """,
+        (provider, task_type, task_key),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_provider_tasks(
+    db: sqlite3.Connection,
+    *,
+    provider: str | None = None,
+    task_type: str | None = None,
+    status: str | None = None,
+    retry_requested: bool | None = None,
+    lead_id: int | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    sql = "SELECT * FROM provider_tasks"
+    filters: list[str] = []
+    params: list[object] = []
+    if provider:
+        filters.append("provider = ?")
+        params.append(str(provider))
+    if task_type:
+        filters.append("task_type = ?")
+        params.append(str(task_type))
+    if status:
+        filters.append("status = ?")
+        params.append(str(status))
+    if retry_requested is not None:
+        filters.append("retry_requested = ?")
+        params.append(1 if retry_requested else 0)
+    if lead_id is not None:
+        filters.append("lead_id = ?")
+        params.append(int(lead_id))
+    if filters:
+        sql += " WHERE " + " AND ".join(filters)
+    sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
+    return [dict(row) for row in db.execute(sql, tuple(params)).fetchall()]
+
+
+def claim_provider_task(
+    db: sqlite3.Connection,
+    *,
+    provider: str,
+    task_type: str,
+    task_key: str,
+    lead_id: int = 0,
+    campaign_run_id: int = 0,
+    run_log_id: int = 0,
+    metadata: dict | None = None,
+) -> dict:
+    existing = get_provider_task(db, provider=provider, task_type=task_type, task_key=task_key)
+    next_metadata = _json_text(metadata or {})
+    if existing is None:
+        db.execute(
+            """
+            INSERT INTO provider_tasks
+              (
+                provider, task_type, task_key, lead_id, campaign_run_id, run_log_id, status,
+                retry_requested, retry_marked_at, retry_marked_by, attempts, metadata
+              )
+            VALUES (?, ?, ?, ?, ?, ?, 'running', 0, '', '', 1, ?)
+            """,
+            (
+                provider,
+                task_type,
+                task_key,
+                int(lead_id or 0),
+                int(campaign_run_id or 0),
+                int(run_log_id or 0),
+                next_metadata,
+            ),
+        )
+        db.commit()
+        task = get_provider_task(db, provider=provider, task_type=task_type, task_key=task_key)
+        return {
+            "should_run": True,
+            "skip_status": "",
+            "message": "",
+            "task": task,
+        }
+
+    status = str(existing.get("status") or "").strip().lower()
+    if status == "completed":
+        return {
+            "should_run": False,
+            "skip_status": "deduped",
+            "message": f"{provider} 任务已完成，默认不重复调用。",
+            "task": existing,
+        }
+    if status in {"error", "running"} and not int(existing.get("retry_requested") or 0):
+        return {
+            "should_run": False,
+            "skip_status": "retry_required",
+            "message": f"{provider} 上次失败或中断，需先标记重跑后再调用。",
+            "task": existing,
+        }
+
+    db.execute(
+        """
+        UPDATE provider_tasks
+        SET lead_id = ?, campaign_run_id = ?, run_log_id = ?, status = 'running',
+            retry_requested = 0, retry_marked_at = '', retry_marked_by = '',
+            attempts = attempts + 1, metadata = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            int(lead_id or 0),
+            int(campaign_run_id or 0),
+            int(run_log_id or 0),
+            next_metadata,
+            int(existing["id"]),
+        ),
+    )
+    db.commit()
+    task = get_provider_task(db, provider=provider, task_type=task_type, task_key=task_key)
+    return {
+        "should_run": True,
+        "skip_status": "",
+        "message": "",
+        "task": task,
+    }
+
+
+def finish_provider_task(
+    db: sqlite3.Connection,
+    task_id: int,
+    *,
+    status: str,
+    cost_units: float = 0.0,
+    message: str = "",
+    error: str = "",
+    metadata: dict | None = None,
+) -> dict:
+    db.execute(
+        """
+        UPDATE provider_tasks
+        SET status = ?, retry_requested = 0, retry_marked_at = '', retry_marked_by = '',
+            cost_units_total = cost_units_total + ?,
+            last_message = ?, last_error = ?, metadata = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            str(status or "").strip(),
+            float(cost_units or 0.0),
+            sanitize_error(message),
+            sanitize_error(error),
+            _json_text(metadata or {}),
+            int(task_id),
+        ),
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM provider_tasks WHERE id = ?", (int(task_id),)).fetchone()
+    return dict(row)
+
+
+def mark_provider_tasks_for_retry(
+    db: sqlite3.Connection,
+    *,
+    provider: str | None = None,
+    task_type: str | None = None,
+    lead_id: int | None = None,
+    task_key: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    sql = """
+        SELECT id FROM provider_tasks
+        WHERE status IN ('error', 'running') AND retry_requested = 0
+    """
+    params: list[object] = []
+    if provider:
+        sql += " AND provider = ?"
+        params.append(str(provider))
+    if task_type:
+        sql += " AND task_type = ?"
+        params.append(str(task_type))
+    if lead_id is not None:
+        sql += " AND lead_id = ?"
+        params.append(int(lead_id))
+    if task_key:
+        sql += " AND task_key = ?"
+        params.append(str(task_key))
+    sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
+    params.append(max(1, int(limit)))
+    task_ids = [int(row["id"]) for row in db.execute(sql, tuple(params)).fetchall()]
+    if not task_ids:
+        return []
+    placeholders = ", ".join("?" for _ in task_ids)
+    db.execute(
+        f"""
+        UPDATE provider_tasks
+        SET retry_requested = 1, retry_marked_at = CURRENT_TIMESTAMP,
+            retry_marked_by = 'manual_filter', updated_at = CURRENT_TIMESTAMP
+        WHERE id IN ({placeholders})
+        """,
+        tuple(task_ids),
+    )
+    db.commit()
+    rows = db.execute(
+        f"SELECT * FROM provider_tasks WHERE id IN ({placeholders}) ORDER BY updated_at DESC, id DESC",
+        tuple(task_ids),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def mark_provider_task_ids_for_retry(
+    db: sqlite3.Connection,
+    task_ids: list[int] | tuple[int, ...],
+    *,
+    marked_by: str = "manual_selection",
+) -> list[dict]:
+    normalized = sorted({int(task_id) for task_id in task_ids if int(task_id) > 0})
+    if not normalized:
+        return []
+    placeholders = ", ".join("?" for _ in normalized)
+    params: tuple[object, ...] = (str(marked_by or "manual_selection"), *normalized)
+    db.execute(
+        f"""
+        UPDATE provider_tasks
+        SET retry_requested = 1, retry_marked_at = CURRENT_TIMESTAMP,
+            retry_marked_by = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id IN ({placeholders})
+          AND status IN ('error', 'running')
+        """,
+        params,
+    )
+    db.commit()
+    rows = db.execute(
+        f"SELECT * FROM provider_tasks WHERE id IN ({placeholders}) ORDER BY updated_at DESC, id DESC",
+        tuple(normalized),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_provider_tasks_by_ids(
+    db: sqlite3.Connection,
+    task_ids: list[int] | tuple[int, ...],
+) -> list[dict]:
+    normalized = sorted({int(task_id) for task_id in task_ids if int(task_id) > 0})
+    if not normalized:
+        return []
+    placeholders = ", ".join("?" for _ in normalized)
+    rows = db.execute(
+        f"SELECT * FROM provider_tasks WHERE id IN ({placeholders}) ORDER BY updated_at DESC, id DESC",
+        tuple(normalized),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def list_run_logs(db: sqlite3.Connection, run_type: str | None = None, limit: int = 20) -> list[dict]:

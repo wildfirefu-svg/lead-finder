@@ -5,7 +5,15 @@ import unittest
 from pathlib import Path
 
 from leadfinder.contact_enrichment import enrich_qualified_emails, verify_existing_qualified_emails
-from leadfinder.db import connect, create_or_skip_lead, create_run_log, list_leads, run_usage_totals
+from leadfinder.db import (
+    connect,
+    create_or_skip_lead,
+    create_run_log,
+    list_leads,
+    list_provider_tasks,
+    mark_provider_tasks_for_retry,
+    run_usage_totals,
+)
 from leadfinder.stability import BudgetManager
 
 
@@ -20,6 +28,15 @@ class FakeHunter:
 class InvalidHunter(FakeHunter):
     def verify_email(self, email: str) -> dict:
         return {"data": {"status": "invalid", "score": 10}}
+
+
+class FailingSearchHunter(FakeHunter):
+    def __init__(self) -> None:
+        self.domain_calls = 0
+
+    def domain_search(self, domain: str) -> dict:
+        self.domain_calls += 1
+        raise RuntimeError("hunter search failed")
 
 
 class ContactEnrichmentTests(unittest.TestCase):
@@ -362,6 +379,50 @@ class ContactEnrichmentTests(unittest.TestCase):
         self.assertEqual(result["attempted"], 0)
         self.assertTrue(result["budget_stops"])
         self.assertEqual(lead["email_verification_status"], "")
+
+    def test_enrich_requires_retry_marker_after_hunter_failure(self) -> None:
+        failing = FailingSearchHunter()
+        recovery = FakeHunter()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Qualified Buyer",
+                        "website": "https://buyer.example",
+                        "status": "Qualified",
+                        "match_score": 75,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
+                    },
+                )
+                first = enrich_qualified_emails(db, failing, limit=5)
+                blocked = enrich_qualified_emails(db, recovery, limit=5)
+                task_before = list_provider_tasks(db, provider="Hunter.io", task_type="domain_search", limit=1)[0]
+                marked = mark_provider_tasks_for_retry(
+                    db,
+                    provider="Hunter.io",
+                    task_type="domain_search",
+                    lead_id=list_leads(db)[0]["id"],
+                )
+                rerun = enrich_qualified_emails(db, recovery, limit=5)
+                lead = list_leads(db)[0]
+                task_after = list_provider_tasks(db, provider="Hunter.io", task_type="domain_search", limit=1)[0]
+            finally:
+                db.close()
+
+        self.assertEqual(first["errors"], 1)
+        self.assertEqual(blocked["attempted"], 0)
+        self.assertEqual(blocked["retry_required_tasks"], 1)
+        self.assertEqual(task_before["status"], "error")
+        self.assertTrue(marked)
+        self.assertEqual(rerun["verified"], 1)
+        self.assertEqual(task_after["status"], "completed")
+        self.assertEqual(task_after["retry_requested"], 0)
+        self.assertEqual(task_after["retry_marked_at"], "")
+        self.assertEqual(lead["email"], "sales@buyer.example")
 
 
 if __name__ == "__main__":

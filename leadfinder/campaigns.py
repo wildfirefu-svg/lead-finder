@@ -6,10 +6,12 @@ from dataclasses import dataclass
 from .apollo import apollo_people_to_contact
 from .classifier import classification_note, classify_company_site
 from .db import (
+    claim_provider_task,
     create_campaign_run,
     create_run_log,
     create_or_skip_lead,
     find_duplicate,
+    finish_provider_task,
     finish_run_log,
     finish_campaign_run,
     list_leads,
@@ -68,6 +70,7 @@ def _serper_event_message(
     product_family: str,
     query: str,
     error: str | None = None,
+    note: str | None = None,
 ) -> str:
     payload = {
         "country": country,
@@ -77,7 +80,27 @@ def _serper_event_message(
     }
     if error is not None:
         payload["error"] = str(error)[:240]
+    if note is not None:
+        payload["note"] = str(note)[:240]
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _serper_task_key(query: str) -> str:
+    return "query:" + " ".join(str(query or "").strip().lower().split())
+
+
+def _apollo_task_key(lead: dict) -> str:
+    company = " ".join(str(lead.get("company_name", "") or "").strip().lower().split())
+    country = " ".join(str(lead.get("country_region", "") or "").strip().lower().split())
+    return f"lead:{int(lead.get('id') or 0)}|company:{company}|country:{country}"
+
+
+def _hunter_domain_task_key(lead: dict, domain: str) -> str:
+    return f"lead:{int(lead.get('id') or 0)}|domain:{str(domain or '').strip().lower()}"
+
+
+def _hunter_verify_task_key(lead: dict, email: str) -> str:
+    return f"lead:{int(lead.get('id') or 0)}|email:{str(email or '').strip().lower()}"
 
 
 def run_campaign(
@@ -134,6 +157,8 @@ def run_campaign(
     skipped = 0
     errors = 0
     budget_stops: list[dict] = []
+    deduped_tasks = 0
+    retry_required_tasks = 0
 
     def log_provider_event(*, provider: str, event_type: str, status: str, cost_units: float, message: str) -> None:
         record_provider_event(
@@ -218,9 +243,58 @@ def run_campaign(
                 query_specs = build_query_specs(country, options.hs_code, effective_product)
                 query_limit = min(len(query_specs), max(4, min(8, int(options.per_market_limit))))
                 for spec in query_specs[:query_limit]:
+                    if created_for_market >= int(options.per_market_limit):
+                        break
+                    query = spec["query"]
+                    task_decision = claim_provider_task(
+                        db,
+                        provider="Serper",
+                        task_type="search",
+                        task_key=_serper_task_key(query),
+                        campaign_run_id=run_id,
+                        run_log_id=run_log_id,
+                        metadata={
+                            "country": country,
+                            "locale": spec["locale"],
+                            "product_family": spec["product_family"],
+                            "query": query,
+                        },
+                    )
+                    if not task_decision["should_run"]:
+                        skipped += 1
+                        if task_decision["skip_status"] == "deduped":
+                            deduped_tasks += 1
+                        elif task_decision["skip_status"] == "retry_required":
+                            retry_required_tasks += 1
+                        log_provider_event(
+                            provider="Serper",
+                            event_type="search",
+                            status=task_decision["skip_status"],
+                            cost_units=0,
+                            message=_serper_event_message(
+                                country=country,
+                                locale=spec["locale"],
+                                product_family=spec["product_family"],
+                                query=query,
+                                note=task_decision["message"],
+                            ),
+                        )
+                        continue
                     stop = budget_manager.check("Serper", 1.0)
                     if stop is not None:
                         budget_stops.append(stop)
+                        finish_provider_task(
+                            db,
+                            int(task_decision["task"]["id"]),
+                            status="budget_stop",
+                            message=stop["message"],
+                            metadata={
+                                "country": country,
+                                "locale": spec["locale"],
+                                "product_family": spec["product_family"],
+                                "query": query,
+                            },
+                        )
                         log_provider_event(
                             provider="Serper",
                             event_type="search",
@@ -230,9 +304,6 @@ def run_campaign(
                         )
                         serper_budget_stopped = True
                         break
-                    if created_for_market >= int(options.per_market_limit):
-                        break
-                    query = spec["query"]
                     serper_message = _serper_event_message(
                         country=country,
                         locale=spec["locale"],
@@ -241,6 +312,19 @@ def run_campaign(
                     )
                     try:
                         payload = serper_client.search(query, num=max(1, min(options.per_market_limit, 100)))
+                        finish_provider_task(
+                            db,
+                            int(task_decision["task"]["id"]),
+                            status="completed",
+                            cost_units=1.0,
+                            message=serper_message,
+                            metadata={
+                                "country": country,
+                                "locale": spec["locale"],
+                                "product_family": spec["product_family"],
+                                "query": query,
+                            },
+                        )
                         log_provider_event(
                             provider="Serper",
                             event_type="search",
@@ -250,18 +334,32 @@ def run_campaign(
                         )
                     except Exception as error:
                         errors += 1
+                        structured_error = _serper_event_message(
+                            country=country,
+                            locale=spec["locale"],
+                            product_family=spec["product_family"],
+                            query=query,
+                            error=str(error),
+                        )
+                        finish_provider_task(
+                            db,
+                            int(task_decision["task"]["id"]),
+                            status="error",
+                            message=structured_error,
+                            error=str(error),
+                            metadata={
+                                "country": country,
+                                "locale": spec["locale"],
+                                "product_family": spec["product_family"],
+                                "query": query,
+                            },
+                        )
                         log_provider_event(
                             provider="Serper",
                             event_type="search",
                             status="error",
                             cost_units=0,
-                            message=_serper_event_message(
-                                country=country,
-                                locale=spec["locale"],
-                                product_family=spec["product_family"],
-                                query=query,
-                                error=str(error),
-                            ),
+                            message=structured_error,
                         )
                         continue
                     for lead in results_to_leads(payload, country, query):
@@ -357,6 +455,8 @@ def run_campaign(
                 "campaign_run_id": run_id,
                 "quality_after": quality_after,
                 "budget_stops": budget_stops,
+                "deduped_tasks": deduped_tasks,
+                "retry_required_tasks": retry_required_tasks,
             },
         )
         return {
@@ -367,6 +467,8 @@ def run_campaign(
             "skipped": skipped,
             "errors": errors,
             "budget_stops": budget_stops,
+            "deduped_tasks": deduped_tasks,
+            "retry_required_tasks": retry_required_tasks,
             "quality_before": quality_before,
             "quality_after": quality_after,
         }
@@ -393,6 +495,8 @@ def run_campaign(
                 "campaign_run_id": run_id,
                 "quality_after": quality_after,
                 "budget_stops": budget_stops,
+                "deduped_tasks": deduped_tasks,
+                "retry_required_tasks": retry_required_tasks,
             },
         )
         raise
@@ -532,85 +636,225 @@ def _enrich_optional(
     notes = lead.get("notes", "")
 
     if options.use_apollo and apollo_client is not None and lead.get("company_name"):
-        stop = budget_manager.check("Apollo.io", 1.0)
-        if stop is not None:
-            budget_stops.append(stop)
+        apollo_decision = claim_provider_task(
+            db,
+            provider="Apollo.io",
+            task_type="contact",
+            task_key=_apollo_task_key(lead),
+            lead_id=int(lead.get("id") or 0),
+            campaign_run_id=run_id,
+            metadata={
+                "company_name": lead.get("company_name", ""),
+                "country_region": lead.get("country_region", ""),
+            },
+        )
+        if not apollo_decision["should_run"]:
             log_provider_event(
                 provider="Apollo.io",
                 event_type="contact",
-                status="budget_stop",
+                status=apollo_decision["skip_status"],
                 cost_units=0,
-                message=stop["message"],
+                message=apollo_decision["message"],
             )
         else:
-            try:
-                payload = apollo_client.people_search(lead["company_name"], lead.get("country_region", ""))
-                contact = apollo_people_to_contact(payload)
-                if contact.get("contact_name"):
-                    updates["contact_name"] = contact["contact_name"]
-                notes = _append_note(notes, contact.get("notes", ""))
-                log_provider_event(
-                    provider="Apollo.io",
-                    event_type="contact",
-                    status="ok",
-                    cost_units=1,
-                    message=lead["company_name"],
+            stop = budget_manager.check("Apollo.io", 1.0)
+            if stop is not None:
+                budget_stops.append(stop)
+                finish_provider_task(
+                    db,
+                    int(apollo_decision["task"]["id"]),
+                    status="budget_stop",
+                    message=stop["message"],
+                    metadata={
+                        "company_name": lead.get("company_name", ""),
+                        "country_region": lead.get("country_region", ""),
+                    },
                 )
-            except Exception as error:
                 log_provider_event(
                     provider="Apollo.io",
                     event_type="contact",
-                    status="error",
+                    status="budget_stop",
                     cost_units=0,
-                    message=str(error),
+                    message=stop["message"],
                 )
+            else:
+                try:
+                    payload = apollo_client.people_search(lead["company_name"], lead.get("country_region", ""))
+                    contact = apollo_people_to_contact(payload)
+                    if contact.get("contact_name"):
+                        updates["contact_name"] = contact["contact_name"]
+                    notes = _append_note(notes, contact.get("notes", ""))
+                    finish_provider_task(
+                        db,
+                        int(apollo_decision["task"]["id"]),
+                        status="completed",
+                        cost_units=1.0,
+                        message=lead["company_name"],
+                        metadata={
+                            "company_name": lead.get("company_name", ""),
+                            "country_region": lead.get("country_region", ""),
+                        },
+                    )
+                    log_provider_event(
+                        provider="Apollo.io",
+                        event_type="contact",
+                        status="ok",
+                        cost_units=1,
+                        message=lead["company_name"],
+                    )
+                except Exception as error:
+                    finish_provider_task(
+                        db,
+                        int(apollo_decision["task"]["id"]),
+                        status="error",
+                        message=lead["company_name"],
+                        error=str(error),
+                        metadata={
+                            "company_name": lead.get("company_name", ""),
+                            "country_region": lead.get("country_region", ""),
+                        },
+                    )
+                    log_provider_event(
+                        provider="Apollo.io",
+                        event_type="contact",
+                        status="error",
+                        cost_units=0,
+                        message=str(error),
+                    )
 
     domain = normalize_domain(lead.get("website", ""))
     if options.use_hunter and hunter_client is not None and domain:
-        projected_cost = 2.0
-        stop = budget_manager.check("Hunter.io", projected_cost)
-        if stop is not None:
-            budget_stops.append(stop)
+        search_decision = claim_provider_task(
+            db,
+            provider="Hunter.io",
+            task_type="domain_search",
+            task_key=_hunter_domain_task_key(lead, domain),
+            lead_id=int(lead.get("id") or 0),
+            campaign_run_id=run_id,
+            metadata={"domain": domain},
+        )
+        if not search_decision["should_run"]:
             log_provider_event(
                 provider="Hunter.io",
                 event_type="email",
-                status="budget_stop",
+                status=search_decision["skip_status"],
                 cost_units=0,
-                message=stop["message"],
+                message=search_decision["message"],
             )
         else:
-            try:
-                payload = hunter_client.domain_search(domain)
-                email = hunter_domain_to_email(payload)
-                cost_units = 1.0
-                if email.get("email"):
-                    verify_payload = hunter_client.verify_email(email["email"])
-                    cost_units += 1.0
-                    notes = _append_note(notes, hunter_verification_note(verify_payload))
-                    verification_status = str(
-                        (verify_payload.get("data") or {}).get("status") or ""
-                    ).lower()
-                    if verification_status == "valid":
-                        updates["email"] = email["email"]
-                    updates["email_verification_status"] = verification_status or "unknown"
-                else:
-                    updates["email_verification_status"] = "not_found"
-                notes = _append_note(notes, email.get("notes", ""))
-                log_provider_event(
-                    provider="Hunter.io",
-                    event_type="email",
-                    status="ok",
-                    cost_units=cost_units,
-                    message=domain,
+            projected_cost = 2.0
+            stop = budget_manager.check("Hunter.io", projected_cost)
+            if stop is not None:
+                budget_stops.append(stop)
+                finish_provider_task(
+                    db,
+                    int(search_decision["task"]["id"]),
+                    status="budget_stop",
+                    message=stop["message"],
+                    metadata={"domain": domain},
                 )
-            except Exception as error:
                 log_provider_event(
                     provider="Hunter.io",
                     event_type="email",
-                    status="error",
+                    status="budget_stop",
                     cost_units=0,
-                    message=str(error),
+                    message=stop["message"],
                 )
+            else:
+                try:
+                    payload = hunter_client.domain_search(domain)
+                    email = hunter_domain_to_email(payload)
+                    finish_provider_task(
+                        db,
+                        int(search_decision["task"]["id"]),
+                        status="completed",
+                        cost_units=1.0,
+                        message=domain,
+                        metadata={"domain": domain, "email": email.get("email", "")},
+                    )
+                    cost_units = 1.0
+                    verify_failed = False
+                    if email.get("email"):
+                        verify_decision = claim_provider_task(
+                            db,
+                            provider="Hunter.io",
+                            task_type="verify_email",
+                            task_key=_hunter_verify_task_key(lead, email["email"]),
+                            lead_id=int(lead.get("id") or 0),
+                            campaign_run_id=run_id,
+                            metadata={"email": email["email"]},
+                        )
+                        if not verify_decision["should_run"]:
+                            log_provider_event(
+                                provider="Hunter.io",
+                                event_type="email",
+                                status=verify_decision["skip_status"],
+                                cost_units=0,
+                                message=verify_decision["message"],
+                            )
+                        else:
+                            try:
+                                verify_payload = hunter_client.verify_email(email["email"])
+                                cost_units += 1.0
+                                finish_provider_task(
+                                    db,
+                                    int(verify_decision["task"]["id"]),
+                                    status="completed",
+                                    cost_units=1.0,
+                                    message=email["email"],
+                                    metadata={"email": email["email"]},
+                                )
+                                notes = _append_note(notes, hunter_verification_note(verify_payload))
+                                verification_status = str(
+                                    (verify_payload.get("data") or {}).get("status") or ""
+                                ).lower()
+                                if verification_status == "valid":
+                                    updates["email"] = email["email"]
+                                updates["email_verification_status"] = verification_status or "unknown"
+                            except Exception as verify_error:
+                                finish_provider_task(
+                                    db,
+                                    int(verify_decision["task"]["id"]),
+                                    status="error",
+                                    message=email["email"],
+                                    error=str(verify_error),
+                                    metadata={"email": email["email"]},
+                                )
+                                log_provider_event(
+                                    provider="Hunter.io",
+                                    event_type="email",
+                                    status="error",
+                                    cost_units=0,
+                                    message=str(verify_error),
+                                )
+                                verify_failed = True
+                    else:
+                        updates["email_verification_status"] = "not_found"
+                    notes = _append_note(notes, email.get("notes", ""))
+                    if not verify_failed:
+                        log_provider_event(
+                            provider="Hunter.io",
+                            event_type="email",
+                            status="ok",
+                            cost_units=cost_units,
+                            message=domain,
+                        )
+                except Exception as error:
+                    finish_provider_task(
+                        db,
+                        int(search_decision["task"]["id"]),
+                        status="error",
+                        message=domain,
+                        error=str(error),
+                        metadata={"domain": domain},
+                    )
+                    log_provider_event(
+                        provider="Hunter.io",
+                        event_type="email",
+                        status="error",
+                        cost_units=0,
+                        message=str(error),
+                    )
 
     if notes != lead.get("notes", ""):
         updates["notes"] = notes

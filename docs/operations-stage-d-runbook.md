@@ -63,6 +63,12 @@ Reason:
 - those providers may consume paid quota or credits
 - repeated paid calls should be a deliberate operator decision
 
+Task-level behavior:
+
+- completed paid tasks are deduped and skipped by default
+- failed or interrupted paid tasks are not rerun automatically
+- rerun requires an explicit retry marker
+
 ### Safe rerun principle
 
 If a run stops because of:
@@ -264,6 +270,30 @@ If budget stops after partial progress:
 - do not assume the remaining candidates were processed
 - review the lead table and notes
 - rerun only after the budget condition is cleared
+
+### Paid task retry marker
+
+Inspect failed tasks:
+
+```powershell
+python cli.py provider-task-report --provider Serper --status error
+python cli.py provider-task-report --provider Hunter.io --status error --lead-id 12
+```
+
+Mark tasks so they can run again:
+
+```powershell
+python cli.py mark-provider-retry --provider Serper --task-type search --limit 20
+python cli.py mark-provider-retry --provider Hunter.io --task-type domain_search --lead-id 12
+python cli.py mark-provider-retry --provider Hunter.io --task-type verify_email --lead-id 12
+python cli.py mark-provider-retry --provider Apollo.io --task-type contact --lead-id 12
+```
+
+Rule:
+
+- do not mark everything blindly
+- inspect the previous failure first
+- only mark the tasks you intentionally want to pay for again
 
 ---
 

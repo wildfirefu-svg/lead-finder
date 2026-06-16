@@ -44,6 +44,8 @@ python cli.py enrich --limit 100
 python cli.py sync-crm --limit 50
 python cli.py pull-crm-feedback
 python cli.py crm-feedback-report
+python cli.py provider-task-report --provider Hunter.io --status error
+python cli.py mark-provider-retry --provider Hunter.io --task-type domain_search --lead-id 12
 python cli.py export --output exports/sourced_leads.csv
 python cli.py serve
 python cli.py stats
@@ -102,11 +104,21 @@ The `campaign` command runs Comtrade market selection, Serper discovery, optiona
 Serper, Apollo, and Hunter are optional credit-based providers. Missing API keys disable those providers rather than failing the whole campaign.
 If a configured per-run or daily budget is reached, the campaign stops calling that provider and shows the stop reason in the workbench summary.
 To avoid repeated charges, automatic retry is kept for public/local calls such as Comtrade, local CRM, and website crawl fallback. Paid provider calls stay budget-gated and conservative.
+Completed paid tasks are deduped by task key, and failed paid tasks require an explicit retry marker before they can run again.
 
 Use small limits first:
 
 ```powershell
 python cli.py campaign --market-limit 1 --per-market-limit 3
+```
+
+Inspect or mark paid-provider retries:
+
+```powershell
+python cli.py provider-task-report --provider Serper --status error
+python cli.py mark-provider-retry --provider Serper --task-type search --limit 20
+python cli.py provider-task-report --provider Hunter.io --status error --lead-id 12
+python cli.py mark-provider-retry --provider Hunter.io --task-type domain_search --lead-id 12
 ```
 
 ## Backup and recovery

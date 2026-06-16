@@ -14,8 +14,10 @@ from leadfinder.db import (
     create_or_skip_lead,
     finish_run_log,
     finish_campaign_run,
+    list_provider_tasks,
     list_campaign_runs,
     list_leads,
+    mark_provider_tasks_for_retry,
     list_provider_events,
     list_run_logs,
     list_run_usage_events,
@@ -274,6 +276,15 @@ class FailingSerperClient:
         raise RuntimeError("x" * 2000)
 
 
+class OneTimeFailingSerperClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def search(self, query: str, num: int = 10) -> dict:
+        self.calls += 1
+        raise RuntimeError("temporary serper failure")
+
+
 class FakeApolloClient:
     def people_search(self, company: str, country: str = "", per_page: int = 3) -> dict:
         return {"people": [{"name": "Jane Buyer", "title": "Purchasing Manager"}]}
@@ -286,6 +297,15 @@ class TrackingApolloClient(FakeApolloClient):
     def people_search(self, company: str, country: str = "", per_page: int = 3) -> dict:
         self.calls.append((company, country))
         return super().people_search(company, country, per_page)
+
+
+class FailingApolloClient(FakeApolloClient):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def people_search(self, company: str, country: str = "", per_page: int = 3) -> dict:
+        self.calls += 1
+        raise RuntimeError("apollo temporary failure")
 
 
 class FakeHunterClient:
@@ -303,6 +323,15 @@ class TrackingHunterClient(FakeHunterClient):
     def domain_search(self, domain: str) -> dict:
         self.calls.append(domain)
         return super().domain_search(domain)
+
+
+class FailingHunterClient(FakeHunterClient):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def domain_search(self, domain: str) -> dict:
+        self.calls += 1
+        raise RuntimeError("hunter temporary failure")
 
 class InvalidHunterClient(FakeHunterClient):
     def verify_email(self, email: str) -> dict:
@@ -715,6 +744,67 @@ class CampaignRunnerTests(unittest.TestCase):
         self.assertEqual(apollo.calls, [])
         self.assertEqual(hunter.calls, [])
 
+    def test_optional_enrichment_requires_retry_marker_after_apollo_failure(self) -> None:
+        failing = FailingApolloClient()
+        recovery = TrackingApolloClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                run = create_campaign_run(db, {"name": "apollo retry"})
+                create_or_skip_lead(
+                    db,
+                    {
+                        "company_name": "Retry Buyer",
+                        "country_region": "USA",
+                        "website": "https://buyer.example",
+                        "status": "Qualified",
+                        "match_score": 90,
+                        "classification_status": "buyer",
+                        "market_fit_status": "passed",
+                        "crawl_status": "ok",
+                    },
+                )
+                lead = list_leads(db)[0]
+                _enrich_optional(
+                    db,
+                    lead,
+                    CampaignOptions(use_apollo=True),
+                    failing,
+                    None,
+                    run["id"],
+                )
+                _enrich_optional(
+                    db,
+                    lead,
+                    CampaignOptions(use_apollo=True),
+                    recovery,
+                    None,
+                    run["id"],
+                )
+                task_before = list_provider_tasks(db, provider="Apollo.io", task_type="contact", limit=1)[0]
+                marked = mark_provider_tasks_for_retry(db, provider="Apollo.io", task_type="contact", lead_id=lead["id"])
+                _enrich_optional(
+                    db,
+                    lead,
+                    CampaignOptions(use_apollo=True),
+                    recovery,
+                    None,
+                    run["id"],
+                )
+                refreshed = list_leads(db)[0]
+                task_after = list_provider_tasks(db, provider="Apollo.io", task_type="contact", limit=1)[0]
+            finally:
+                db.close()
+
+        self.assertEqual(failing.calls, 1)
+        self.assertEqual(recovery.calls, [("Retry Buyer", "USA")])
+        self.assertEqual(task_before["status"], "error")
+        self.assertTrue(marked)
+        self.assertEqual(task_after["status"], "completed")
+        self.assertEqual(task_after["retry_requested"], 0)
+        self.assertEqual(task_after["retry_marked_at"], "")
+        self.assertEqual(refreshed["contact_name"], "Jane Buyer")
+
     def test_campaign_skips_country_mismatch_before_contact_enrichment(self) -> None:
         hunter = TrackingHunterClient()
         with tempfile.TemporaryDirectory() as tmp:
@@ -881,6 +971,103 @@ class CampaignRunnerTests(unittest.TestCase):
         self.assertEqual(run_logs[0]["status"], "Completed")
         self.assertEqual(run_logs[0]["related_run_id"], result["run_id"])
         self.assertTrue(any(event["provider"] == "Serper" and event["cost_units"] == 1.0 for event in usage_events))
+
+    def test_campaign_dedupes_completed_serper_queries_across_runs(self) -> None:
+        first = RecordingSerperClient()
+        second = RecordingSerperClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                run_campaign(
+                    db,
+                    CampaignOptions(
+                        hs_code="701912",
+                        product="all",
+                        target_countries=("Germany",),
+                        per_market_limit=1,
+                        use_serper=True,
+                    ),
+                    serper_client=first,
+                )
+                result = run_campaign(
+                    db,
+                    CampaignOptions(
+                        hs_code="701912",
+                        product="all",
+                        target_countries=("Germany",),
+                        per_market_limit=1,
+                        use_serper=True,
+                    ),
+                    serper_client=second,
+                )
+                tasks = list_provider_tasks(db, provider="Serper", task_type="search", limit=20)
+            finally:
+                db.close()
+
+        self.assertTrue(first.queries)
+        self.assertEqual(second.queries, [])
+        self.assertGreater(result["deduped_tasks"], 0)
+        self.assertTrue(all(task["status"] == "completed" for task in tasks))
+
+    def test_campaign_requires_retry_marker_before_rerunning_failed_serper_query(self) -> None:
+        failing = OneTimeFailingSerperClient()
+        recovery = RecordingSerperClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = connect(Path(tmp) / "leadfinder.sqlite")
+            try:
+                first = run_campaign(
+                    db,
+                    CampaignOptions(
+                        hs_code="701912",
+                        product="all",
+                        target_countries=("Germany",),
+                        per_market_limit=1,
+                        use_serper=True,
+                    ),
+                    serper_client=failing,
+                )
+                blocked = run_campaign(
+                    db,
+                    CampaignOptions(
+                        hs_code="701912",
+                        product="all",
+                        target_countries=("Germany",),
+                        per_market_limit=1,
+                        use_serper=True,
+                    ),
+                    serper_client=recovery,
+                )
+                blocked_queries = list(recovery.queries)
+                marked = mark_provider_tasks_for_retry(
+                    db,
+                    provider="Serper",
+                    task_type="search",
+                    limit=10,
+                )
+                rerun = run_campaign(
+                    db,
+                    CampaignOptions(
+                        hs_code="701912",
+                        product="all",
+                        target_countries=("Germany",),
+                        per_market_limit=1,
+                        use_serper=True,
+                    ),
+                    serper_client=recovery,
+                )
+                task = list_provider_tasks(db, provider="Serper", task_type="search", limit=1)[0]
+            finally:
+                db.close()
+
+        self.assertEqual(first["errors"], 4)
+        self.assertEqual(blocked_queries, [])
+        self.assertEqual(blocked["retry_required_tasks"], 4)
+        self.assertTrue(marked)
+        self.assertTrue(recovery.queries)
+        self.assertEqual(rerun["retry_required_tasks"], 0)
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["retry_requested"], 0)
+        self.assertEqual(task["retry_marked_at"], "")
 
     def test_campaign_keeps_query_budget_independent_per_country(self) -> None:
         client = RecordingSerperClient()
