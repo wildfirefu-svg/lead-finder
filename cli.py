@@ -16,6 +16,7 @@ from leadfinder.db import (
     list_provider_tasks,
     mark_provider_tasks_for_retry,
     stats,
+    summarize_provider_tasks,
     update_lead,
     upsert_market,
 )
@@ -282,9 +283,10 @@ def cmd_provider_task_report(args: argparse.Namespace) -> int:
             lead_id=args.lead_id,
             limit=args.limit,
         )
+        summary = summarize_provider_tasks(rows)
     finally:
         db.close()
-    print(json.dumps({"tasks": rows}, ensure_ascii=False, indent=2))
+    print(json.dumps({"tasks": rows, "summary": summary}, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -299,6 +301,8 @@ def cmd_mark_provider_retry(args: argparse.Namespace) -> int:
             lead_id=args.lead_id,
             task_key=args.task_key,
             limit=args.limit,
+            marked_by="cli",
+            reason=args.reason,
         )
     finally:
         db.close()
@@ -403,6 +407,7 @@ def build_parser() -> argparse.ArgumentParser:
     mark_provider_retry.add_argument("--lead-id", type=int, default=None)
     mark_provider_retry.add_argument("--task-key", default=None)
     mark_provider_retry.add_argument("--limit", type=int, default=50)
+    mark_provider_retry.add_argument("--reason", default="")
     mark_provider_retry.set_defaults(func=cmd_mark_provider_retry)
     return parser
 

@@ -283,10 +283,10 @@ python cli.py provider-task-report --provider Hunter.io --status error --lead-id
 Mark tasks so they can run again:
 
 ```powershell
-python cli.py mark-provider-retry --provider Serper --task-type search --limit 20
-python cli.py mark-provider-retry --provider Hunter.io --task-type domain_search --lead-id 12
-python cli.py mark-provider-retry --provider Hunter.io --task-type verify_email --lead-id 12
-python cli.py mark-provider-retry --provider Apollo.io --task-type contact --lead-id 12
+python cli.py mark-provider-retry --provider Serper --task-type search --limit 20 --reason "quota reset"
+python cli.py mark-provider-retry --provider Hunter.io --task-type domain_search --lead-id 12 --reason "site back online"
+python cli.py mark-provider-retry --provider Hunter.io --task-type verify_email --lead-id 12 --reason "email corrected"
+python cli.py mark-provider-retry --provider Apollo.io --task-type contact --lead-id 12 --reason "manual approval"
 ```
 
 Rule:
@@ -294,6 +294,7 @@ Rule:
 - do not mark everything blindly
 - inspect the previous failure first
 - only mark the tasks you intentionally want to pay for again
+- record a short retry reason so later operators know why the rerun was approved
 
 ---
 

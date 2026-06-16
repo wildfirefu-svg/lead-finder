@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS provider_tasks (
   retry_requested INTEGER NOT NULL DEFAULT 0,
   retry_marked_at TEXT NOT NULL DEFAULT '',
   retry_marked_by TEXT NOT NULL DEFAULT '',
+  retry_reason TEXT NOT NULL DEFAULT '',
   attempts INTEGER NOT NULL DEFAULT 0,
   cost_units_total REAL NOT NULL DEFAULT 0,
   last_error TEXT NOT NULL DEFAULT '',
@@ -203,6 +204,7 @@ LEAD_STATUS_COLUMNS = {
 PROVIDER_TASK_STATUS_COLUMNS = {
     "retry_marked_at": "TEXT NOT NULL DEFAULT ''",
     "retry_marked_by": "TEXT NOT NULL DEFAULT ''",
+    "retry_reason": "TEXT NOT NULL DEFAULT ''",
 }
 
 
@@ -493,6 +495,34 @@ def list_provider_tasks(
     return [dict(row) for row in db.execute(sql, tuple(params)).fetchall()]
 
 
+def summarize_provider_tasks(tasks: list[dict]) -> list[dict]:
+    grouped: dict[tuple[str, str], dict] = {}
+    for task in tasks:
+        provider = str(task.get("provider") or "")
+        task_type = str(task.get("task_type") or "")
+        key = (provider, task_type)
+        summary = grouped.setdefault(
+            key,
+            {
+                "provider": provider,
+                "task_type": task_type,
+                "total": 0,
+                "error": 0,
+                "running": 0,
+                "completed": 0,
+                "budget_stop": 0,
+                "marked": 0,
+            },
+        )
+        summary["total"] += 1
+        status = str(task.get("status") or "").strip().lower()
+        if status in {"error", "running", "completed", "budget_stop"}:
+            summary[status] += 1
+        if int(task.get("retry_requested") or 0):
+            summary["marked"] += 1
+    return sorted(grouped.values(), key=lambda item: (item["provider"], item["task_type"]))
+
+
 def claim_provider_task(
     db: sqlite3.Connection,
     *,
@@ -512,9 +542,9 @@ def claim_provider_task(
             INSERT INTO provider_tasks
               (
                 provider, task_type, task_key, lead_id, campaign_run_id, run_log_id, status,
-                retry_requested, retry_marked_at, retry_marked_by, attempts, metadata
+                retry_requested, retry_marked_at, retry_marked_by, retry_reason, attempts, metadata
               )
-            VALUES (?, ?, ?, ?, ?, ?, 'running', 0, '', '', 1, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 'running', 0, '', '', '', 1, ?)
             """,
             (
                 provider,
@@ -555,7 +585,7 @@ def claim_provider_task(
         """
         UPDATE provider_tasks
         SET lead_id = ?, campaign_run_id = ?, run_log_id = ?, status = 'running',
-            retry_requested = 0, retry_marked_at = '', retry_marked_by = '',
+            retry_requested = 0, retry_marked_at = '', retry_marked_by = '', retry_reason = '',
             attempts = attempts + 1, metadata = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
         """,
@@ -591,6 +621,7 @@ def finish_provider_task(
         """
         UPDATE provider_tasks
         SET status = ?, retry_requested = 0, retry_marked_at = '', retry_marked_by = '',
+            retry_reason = '',
             cost_units_total = cost_units_total + ?,
             last_message = ?, last_error = ?, metadata = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
@@ -617,6 +648,8 @@ def mark_provider_tasks_for_retry(
     lead_id: int | None = None,
     task_key: str | None = None,
     limit: int = 50,
+    marked_by: str = "manual_filter",
+    reason: str = "",
 ) -> list[dict]:
     sql = """
         SELECT id FROM provider_tasks
@@ -645,10 +678,10 @@ def mark_provider_tasks_for_retry(
         f"""
         UPDATE provider_tasks
         SET retry_requested = 1, retry_marked_at = CURRENT_TIMESTAMP,
-            retry_marked_by = 'manual_filter', updated_at = CURRENT_TIMESTAMP
+            retry_marked_by = ?, retry_reason = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id IN ({placeholders})
         """,
-        tuple(task_ids),
+        (str(marked_by or "manual_filter"), sanitize_error(reason), *task_ids),
     )
     db.commit()
     rows = db.execute(
@@ -663,17 +696,22 @@ def mark_provider_task_ids_for_retry(
     task_ids: list[int] | tuple[int, ...],
     *,
     marked_by: str = "manual_selection",
+    reason: str = "",
 ) -> list[dict]:
     normalized = sorted({int(task_id) for task_id in task_ids if int(task_id) > 0})
     if not normalized:
         return []
     placeholders = ", ".join("?" for _ in normalized)
-    params: tuple[object, ...] = (str(marked_by or "manual_selection"), *normalized)
+    params: tuple[object, ...] = (
+        str(marked_by or "manual_selection"),
+        sanitize_error(reason),
+        *normalized,
+    )
     db.execute(
         f"""
         UPDATE provider_tasks
         SET retry_requested = 1, retry_marked_at = CURRENT_TIMESTAMP,
-            retry_marked_by = ?, updated_at = CURRENT_TIMESTAMP
+            retry_marked_by = ?, retry_reason = ?, updated_at = CURRENT_TIMESTAMP
         WHERE id IN ({placeholders})
           AND status IN ('error', 'running')
         """,

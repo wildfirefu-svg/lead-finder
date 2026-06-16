@@ -24,6 +24,7 @@ from .db import (
     mark_provider_task_ids_for_retry,
     record_run_usage,
     stats,
+    summarize_provider_tasks,
     update_lead,
 )
 from .evidence import parse_score_evidence, review_status_for_lead, score_reason_text
@@ -478,6 +479,21 @@ INDEX_HTML = """<!doctype html>
       font-size: 12px;
       margin-left: auto;
     }
+    .panel-summary {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin: 0 0 10px;
+    }
+    .panel-summary-item {
+      padding: 6px 8px;
+      border: 1px solid #dbe3e8;
+      border-radius: 6px;
+      background: #f8fafb;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
     .task-key {
       max-width: 240px;
       color: var(--muted);
@@ -652,10 +668,19 @@ __PRODUCT_FAMILY_OPTIONS__
           <option value="marked">仅看已标记重跑</option>
           <option value="all">全部任务</option>
         </select>
+        <select id="provider-task-type" aria-label="任务类型">
+          <option value="">全部任务类型</option>
+          <option value="search">Serper 搜索</option>
+          <option value="contact">Apollo 联系人</option>
+          <option value="domain_search">Hunter 域名找邮箱</option>
+          <option value="verify_email">Hunter 邮箱验证</option>
+        </select>
+        <input id="provider-task-reason" type="text" placeholder="重跑原因，例如：额度恢复后重试">
         <button id="provider-task-refresh" type="button">查看失败任务</button>
         <button id="provider-task-mark-retry" class="action-button" type="button">标记重跑</button>
         <span id="provider-task-status" class="panel-status">正在加载失败任务...</span>
       </div>
+      <div id="provider-task-summary" class="panel-summary"></div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -667,12 +692,13 @@ __PRODUCT_FAMILY_OPTIONS__
               <th>状态</th>
               <th>重跑标记</th>
               <th>次数</th>
+              <th>重跑备注</th>
               <th>任务键</th>
               <th>最后结果</th>
               <th>更新时间</th>
             </tr>
           </thead>
-          <tbody id="provider-task-report"><tr><td class="empty" colspan="10">正在加载失败任务...</td></tr></tbody>
+          <tbody id="provider-task-report"><tr><td class="empty" colspan="11">正在加载失败任务...</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -1314,6 +1340,23 @@ __PRODUCT_FAMILY_OPTIONS__
       if (element) element.textContent = text;
     }
 
+    function renderProviderTaskSummary(summary) {
+      const container = document.getElementById('provider-task-summary');
+      if (!container) return;
+      if (!Array.isArray(summary) || !summary.length) {
+        container.innerHTML = '';
+        return;
+      }
+      container.innerHTML = summary.map((item) => `
+        <div class="panel-summary-item">
+          ${esc(item.provider)} / ${esc(item.task_type)}:
+          失败 ${Number(item.error || 0)}，
+          中断 ${Number(item.running || 0)}，
+          已标记 ${Number(item.marked || 0)}
+        </div>
+      `).join('');
+    }
+
     function syncProviderTaskSelectAll() {
       const rows = Array.from(document.querySelectorAll('input[data-provider-task-id]'));
       const selectAll = document.getElementById('provider-task-select-all');
@@ -1358,17 +1401,21 @@ __PRODUCT_FAMILY_OPTIONS__
     async function loadProviderTasks() {
       const provider = document.getElementById('provider-task-provider').value;
       const scope = document.getElementById('provider-task-scope').value;
+      const taskType = document.getElementById('provider-task-type').value;
       updateProviderTaskStatus('正在刷新失败任务...');
       const params = new URLSearchParams({limit: '100', scope});
       if (provider) params.set('provider', provider);
+      if (taskType) params.set('task_type', taskType);
       const response = await fetch(`/api/provider-tasks?${params.toString()}`);
       const payload = await response.json();
       const rows = Array.isArray(payload.tasks) ? payload.tasks : [];
+      const summary = Array.isArray(payload.summary) ? payload.summary : [];
       const tbody = document.getElementById('provider-task-report');
       const nextSelection = new Set();
       if (!rows.length) {
         selectedProviderTaskIds.clear();
-        tbody.innerHTML = '<tr><td class="empty" colspan="10">当前没有可显示的失败任务。</td></tr>';
+        tbody.innerHTML = '<tr><td class="empty" colspan="11">当前没有可显示的失败任务。</td></tr>';
+        renderProviderTaskSummary(summary);
         syncProviderTaskSelectAll();
         updateProviderTaskStatus(providerTaskSummaryText(rows, scope));
         return;
@@ -1378,6 +1425,10 @@ __PRODUCT_FAMILY_OPTIONS__
         const isSelected = selectedProviderTaskIds.has(taskId);
         if (isSelected) nextSelection.add(taskId);
         const lastResult = task.last_error || task.last_message || '';
+        const retryNote = [
+          task.retry_marked_by ? `来源: ${task.retry_marked_by}` : '',
+          task.retry_reason ? `原因: ${task.retry_reason}` : '',
+        ].filter(Boolean).join(' | ');
         return `
           <tr>
             <td class="task-checkbox"><input type="checkbox" data-provider-task-id="${taskId}" ${isSelected ? 'checked' : ''} aria-label="选择任务 ${taskId}"></td>
@@ -1387,12 +1438,14 @@ __PRODUCT_FAMILY_OPTIONS__
             <td class="state">${esc(stateLabel(task.status))}</td>
             <td class="state">${esc(providerTaskStateLabel(task))}</td>
             <td>${Number(task.attempts || 0)}</td>
+            <td class="task-message">${esc(retryNote || '—')}</td>
             <td class="task-key">${esc(task.task_key)}</td>
             <td class="task-message">${esc(lastResult || '—')}</td>
             <td class="state">${esc(task.updated_at || '')}</td>
           </tr>
         `;
       }).join('');
+      renderProviderTaskSummary(summary);
       selectedProviderTaskIds.clear();
       nextSelection.forEach((taskId) => selectedProviderTaskIds.add(taskId));
       tbody.querySelectorAll('input[data-provider-task-id]').forEach((input) => {
@@ -1405,6 +1458,7 @@ __PRODUCT_FAMILY_OPTIONS__
     async function markSelectedProviderTasksRetry() {
       const button = document.getElementById('provider-task-mark-retry');
       const taskIds = Array.from(selectedProviderTaskIds);
+      const reason = document.getElementById('provider-task-reason').value.trim();
       clearActionButtonStates(button.id);
       if (!taskIds.length) {
         renderActionSummary(button.id, formatProviderTaskRetrySummary({selected: 0, marked: 0, eligible: 0}));
@@ -1422,7 +1476,7 @@ __PRODUCT_FAMILY_OPTIONS__
         const response = await fetch('/api/mark-provider-retry', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({task_ids: taskIds})
+          body: JSON.stringify({task_ids: taskIds, reason})
         });
         const payload = await response.json();
         renderActionSummary(button.id, formatProviderTaskRetrySummary(payload.result || payload));
@@ -1886,6 +1940,7 @@ __PRODUCT_FAMILY_OPTIONS__
     document.getElementById('provider-task-refresh').addEventListener('click', loadProviderTasks);
     document.getElementById('provider-task-provider').addEventListener('change', loadProviderTasks);
     document.getElementById('provider-task-scope').addEventListener('change', loadProviderTasks);
+    document.getElementById('provider-task-type').addEventListener('change', loadProviderTasks);
     document.getElementById('provider-task-select-all').addEventListener('change', onProviderTaskSelectAllChange);
     document.getElementById('provider-task-mark-retry').addEventListener('click', markSelectedProviderTasksRetry);
     document.getElementById('sync-crm').addEventListener('click', syncCrm);
@@ -2031,6 +2086,7 @@ class LocalLeadApp:
         if method == "GET" and parsed.path == "/api/provider-tasks":
             query = parse_qs(parsed.query, keep_blank_values=True)
             provider = str(query.get("provider", [""])[0] or "").strip() or None
+            task_type = str(query.get("task_type", [""])[0] or "").strip() or None
             scope = str(query.get("scope", ["failed"])[0] or "failed").strip().lower()
             limit_text = query.get("limit", ["50"])[0]
             try:
@@ -2041,7 +2097,7 @@ class LocalLeadApp:
                 return self.json_response({"error": "invalid scope"}, status=400)
             db = connect(self.db_path)
             try:
-                rows = list_provider_tasks(db, provider=provider, limit=limit)
+                rows = list_provider_tasks(db, provider=provider, task_type=task_type, limit=limit)
                 if scope == "failed":
                     rows = [
                         row for row in rows
@@ -2049,9 +2105,10 @@ class LocalLeadApp:
                     ]
                 elif scope == "marked":
                     rows = [row for row in rows if int(row.get("retry_requested") or 0)]
+                summary = summarize_provider_tasks(rows)
             finally:
                 db.close()
-            return self.json_response({"tasks": rows, "scope": scope})
+            return self.json_response({"tasks": rows, "summary": summary, "scope": scope})
 
         if method == "GET" and parsed.path == "/api/recall-report":
             query = parse_qs(parsed.query, keep_blank_values=True)
@@ -2224,6 +2281,7 @@ class LocalLeadApp:
         if method == "POST" and parsed.path == "/api/mark-provider-retry":
             payload = json.loads(body.decode("utf-8") or "{}")
             raw_task_ids = payload.get("task_ids", [])
+            reason = str(payload.get("reason", "") or "").strip()
             if not isinstance(raw_task_ids, list):
                 return self.json_response({"error": "task_ids must be a list"}, status=400)
             task_ids: list[int] = []
@@ -2239,7 +2297,7 @@ class LocalLeadApp:
                 run_log = _start_action_log(
                     db,
                     "mark_provider_retry",
-                    {"selected": len(task_ids), "task_ids": task_ids},
+                    {"selected": len(task_ids), "task_ids": task_ids, "reason": reason},
                 )
                 tracked_rows = list_provider_tasks_by_ids(db, task_ids)
                 eligible_ids = {
@@ -2252,7 +2310,12 @@ class LocalLeadApp:
                     for row in tracked_rows
                     if int(row.get("retry_requested") or 0)
                 }
-                rows = mark_provider_task_ids_for_retry(db, task_ids, marked_by="webapp")
+                rows = mark_provider_task_ids_for_retry(
+                    db,
+                    task_ids,
+                    marked_by="webapp",
+                    reason=reason,
+                )
                 marked_ids = {
                     int(row["id"])
                     for row in rows
@@ -2266,6 +2329,7 @@ class LocalLeadApp:
                     "marked": len(marked_ids),
                     "already_marked": len(already_marked_ids & eligible_ids),
                     "not_eligible": max(0, len(task_ids) - len(eligible_ids)),
+                    "reason": reason,
                     "tasks": rows,
                     "errors": 0,
                 }

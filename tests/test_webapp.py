@@ -154,8 +154,12 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("失败任务 / 标记重跑", html)
         self.assertIn('id="provider-task-report"', html)
         self.assertIn('id="provider-task-mark-retry"', html)
+        self.assertIn('id="provider-task-type"', html)
+        self.assertIn('id="provider-task-reason"', html)
+        self.assertIn('id="provider-task-summary"', html)
         self.assertIn("function loadProviderTasks()", html)
         self.assertIn("function markSelectedProviderTasksRetry()", html)
+        self.assertIn("function renderProviderTaskSummary(summary)", html)
 
     def test_api_provider_tasks_lists_failed_rows(self) -> None:
         db = connect(self.db_path)
@@ -189,7 +193,11 @@ class WebAppTests(unittest.TestCase):
         finally:
             db.close()
 
-        status, _, body = make_app(self.db_path).handle("GET", "/api/provider-tasks?scope=failed", b"")
+        status, _, body = make_app(self.db_path).handle(
+            "GET",
+            "/api/provider-tasks?scope=failed&task_type=verify_email",
+            b"",
+        )
         payload = json.loads(body.decode("utf-8"))
 
         self.assertEqual(status, 200)
@@ -197,6 +205,8 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(len(payload["tasks"]), 1)
         self.assertEqual(payload["tasks"][0]["provider"], "Hunter.io")
         self.assertEqual(payload["tasks"][0]["status"], "error")
+        self.assertEqual(payload["summary"][0]["task_type"], "verify_email")
+        self.assertEqual(payload["summary"][0]["error"], 1)
 
     def test_api_mark_provider_retry_marks_selected_failed_tasks(self) -> None:
         db = connect(self.db_path)
@@ -221,7 +231,7 @@ class WebAppTests(unittest.TestCase):
         status, _, body = make_app(self.db_path).handle(
             "POST",
             "/api/mark-provider-retry",
-            json.dumps({"task_ids": [failed_task["id"]]}).encode("utf-8"),
+            json.dumps({"task_ids": [failed_task["id"]], "reason": "额度恢复后重试"}).encode("utf-8"),
         )
         payload = json.loads(body.decode("utf-8"))
 
@@ -231,9 +241,11 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(payload["result"]["marked"], 1)
         self.assertEqual(payload["result"]["already_marked"], 0)
         self.assertEqual(payload["result"]["not_eligible"], 0)
+        self.assertEqual(payload["result"]["reason"], "额度恢复后重试")
         self.assertEqual(payload["result"]["tasks"][0]["retry_requested"], 1)
         self.assertTrue(payload["result"]["tasks"][0]["retry_marked_at"])
         self.assertEqual(payload["result"]["tasks"][0]["retry_marked_by"], "webapp")
+        self.assertEqual(payload["result"]["tasks"][0]["retry_reason"], "额度恢复后重试")
 
     def test_api_mark_provider_retry_reports_already_marked_and_completed_rows(self) -> None:
         db = connect(self.db_path)

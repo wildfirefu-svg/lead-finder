@@ -116,9 +116,9 @@ Inspect or mark paid-provider retries:
 
 ```powershell
 python cli.py provider-task-report --provider Serper --status error
-python cli.py mark-provider-retry --provider Serper --task-type search --limit 20
+python cli.py mark-provider-retry --provider Serper --task-type search --limit 20 --reason "quota reset"
 python cli.py provider-task-report --provider Hunter.io --status error --lead-id 12
-python cli.py mark-provider-retry --provider Hunter.io --task-type domain_search --lead-id 12
+python cli.py mark-provider-retry --provider Hunter.io --task-type domain_search --lead-id 12 --reason "website fixed"
 ```
 
 ## Backup and recovery
